@@ -1,0 +1,16 @@
+bin/
+# The built binary at the repository root. Anchored: an unanchored "spoor"
+# would also swallow cmd/spoor/.
+/spoor
+
+# Never in the repository: databases hold personal traces.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Editor state records absolute paths and recently opened files.
+.idea/
+.vscode/
+*.swp
+.DS_Store
