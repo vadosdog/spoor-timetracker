@@ -45,8 +45,11 @@ first, other people like it second.
 ## Review before every push
 
 Every change is reviewed by a **separate review agent before it is committed
-and pushed**, with security and anonymity as the first priority, ahead of
-style and architecture. Specifically the reviewer looks for:
+and pushed**. Two kinds of review, and a change that touches both code and
+documentation gets both.
+
+**Code review**, with security and anonymity as the first priority, ahead of
+style and architecture. The reviewer looks for:
 
 - personal paths, host names, user names, emails, tokens, real session ids or
   anything else that identifies the author or their employer — in code,
@@ -57,8 +60,28 @@ style and architecture. Specifically the reviewer looks for:
 - SQL built by string concatenation, unchecked file paths, world-readable
   files holding personal data.
 
-No push without that pass. If the reviewer finds something, it is fixed and
-reviewed again — the review is a gate, not a formality.
+**Documentation review**, for anything a reader is expected to follow. Prose
+gets a separate pass because prose fails differently from code, and nothing
+compiles it:
+
+- every claim checked against the source, not against intent. Quoted output
+  must be what the program actually prints;
+- every command run as written, on a real terminal. A snippet that works in a
+  script can still fail when pasted into an interactive shell;
+- promises kept. A section that says "check this for yourself" must actually
+  show the reader enough to check;
+- structure and order: prerequisites before install, no forward references, no
+  saying the same thing four times;
+- English, since it is nobody's first language here.
+
+Both of these have already earned their place. The code review caught a
+missing schema migration that would have made `ingest` exit 0 while importing
+nothing. The documentation review caught three statements that did not match
+the program, a transparency promise that showed a third of the table, and an
+inspection command that bash refused to run at all.
+
+No push without the relevant pass. If the reviewer finds something, it is
+fixed and reviewed again — the review is a gate, not a formality.
 
 ## Layout
 
