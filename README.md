@@ -242,7 +242,9 @@ timer and no shell hook, so removing it is removing files.
 
 **Before you do: the database is the only copy.** Claude Code deletes its own
 session logs after 30 days by default, so everything imported from further
-back than that exists nowhere else on the machine. There is no undo.
+back than that exists nowhere else on the machine. There is no undo, and there
+is no export either — if the history matters to you, `spoor.db` belongs in
+whatever backup you already run.
 
 ```
 rm -rf ~/.local/share/spoor    # the database and its -wal / -shm files

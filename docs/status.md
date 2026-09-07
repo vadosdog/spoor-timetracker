@@ -123,6 +123,17 @@ of them run in CI.
 - **An unterminated line at the end of a file is re-read on every run.** That
   is correct — it is not a line yet — but if such a file stops growing, every
   run rescans up to the line-size cap for nothing. Wasted I/O, no data loss.
+- **The database has no export and no backup, and it is the only copy.** Once
+  a day has aged out of Claude Code's retention window, the events spoor
+  imported from it exist nowhere else. Deleting the file — or losing the
+  disk — loses that history for good, and the loss is silent: a later import
+  brings back fewer days than the database used to hold, with nothing left to
+  compare against. This is not hypothetical. The database was removed while
+  testing the uninstall instructions, and re-importing brought back only what
+  was still on disk; the days that had aged out between the original import
+  and the reimport were gone. Either spoor grows an export command, or the
+  README says plainly that this file belongs in whatever backup the user
+  already runs. The README now says it; the export command is still missing.
 - **Schema changes need an entry in `addedColumns`.** `CREATE TABLE IF NOT
   EXISTS` does nothing to a table that already exists, so a new column never
   reaches an older database on its own, and the failure is quiet: ingest keeps
