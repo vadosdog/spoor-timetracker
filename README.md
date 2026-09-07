@@ -1,32 +1,58 @@
 # spoor
 
-Reconstructs the working day after the fact, from digital traces already on
-your disk. Nothing is started or stopped by hand, nothing runs in the
-background, the screen is never captured.
+Reconstructs the working day after the fact, from traces already on your disk.
+Nothing to start, nothing to stop, nothing running in the background — and the
+screen is never captured.
+
+Today it reads one source: the session logs Claude Code writes under
+`~/.claude/projects`. Without Claude Code installed there is nothing for it to
+read.
 
 **This is a personal tool, published in the open. It works for its author.
-There are no guarantees, no support, and no promises about the next version.**
+There are no guarantees, no support and no promises about the next version.**
 
-## State
+## Status
 
-Early. Right now `spoor` can do exactly two things: read Claude Code session
-logs into a SQLite database, and tell you how many events that database holds
-for a range of days. There is no report, no clustering and no interface yet.
-See [docs/status.md](docs/status.md) for where the work stopped.
+Early. `spoor` can do two things: import Claude Code session logs into SQLite,
+and count what it stored for a date range. There is no report, no clustering
+and no interface yet.
 
-## Never
+[docs/status.md](docs/status.md) says where the work stopped, and lists the
+known rough edges — read it before filing a bug, because the thing you found
+may be on it already.
 
-- **No network.** The tool does not go out, at all. Should that ever change,
-  it will be off by default and said so here, above the install instructions.
-- **Metadata only.** Times, paths, branches, domains, titles. The text of
-  conversations, page contents and screenshots are out of scope — a boundary
-  of the project, not a setting.
-- **No cgo.** SQLite is `modernc.org/sqlite`, so a single static binary
+## What it never does
+
+- **No network.** The tool never opens a network connection. Not for updates,
+  not for telemetry, not at all. If that ever changes, it will be off by
+  default and this section will say so, above the install instructions.
+- **Metadata only.** Times, paths, branches, model names, tool names, and the
+  identifiers Claude Code puts on its own sessions and lines. The text of your
+  conversations, of tool results and of attachments is never stored — a
+  boundary of the project, not a setting. Step 6 below shows you every column
+  there is, so you can check that instead of trusting this paragraph.
+- **Read-only where Claude Code is concerned.** `spoor` never writes to or
+  deletes anything under `~/.claude/`.
+- **No cgo.** SQLite is `modernc.org/sqlite`, so one static binary
   cross-compiles anywhere.
+
+## Requirements
+
+- **Go 1.25 or newer**, to build. Nothing is needed at runtime: the binary is
+  self-contained.
+- **Claude Code**, with session logs in `~/.claude/projects`. That is the only
+  source so far.
+- **`python3` or the `sqlite3` client** — optional, and only for the
+  inspection step of the check below. Either one will do, and most systems
+  already have one.
+
+Built and used on Linux. CI cross-compiles for linux/amd64, linux/arm64,
+darwin/arm64 and windows/amd64, but macOS and Windows are unverified beyond
+the fact that they compile.
 
 ## Install
 
-Requires Go 1.25 or newer. There are no releases yet; build it yourself.
+There are no releases yet; build it yourself.
 
 ```
 git clone https://github.com/vadosdog/spoor-timetracker
@@ -34,24 +60,54 @@ cd spoor-timetracker
 go build -o ~/.local/bin/spoor ./cmd/spoor
 ```
 
-Put the binary wherever your `PATH` points; `~/.local/bin` is only a common
-choice. The rest of this file assumes `spoor` is runnable by name.
+`~/.local/bin` is just one option — anywhere on your `PATH` works. The rest of
+this file assumes `spoor` is runnable by name.
 
-## Use
+## Commands
 
 ```
-spoor ingest                                  # read sources into the database
-spoor count --from 2026-08-25 --to 2026-08-31 # events in that range of days
+spoor ingest [--db PATH] [--claude-dir PATH] [--quiet]
+spoor count  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--source NAME] [--db PATH]
+spoor version
 ```
 
-`spoor ingest` is safe to run as often as you like: importing the same data
-twice changes nothing. It is also worth running often — Claude Code deletes
-its own session logs after 30 days, and only what has been imported survives.
+`spoor <command> -h` prints the flags of that command.
 
-## Checking that it actually works
+**`ingest`** imports what is new and leaves the rest alone: importing the same
+data twice changes nothing. Run it regularly — Claude Code deletes its own
+session logs after 30 days by default, and only what has been imported
+survives that.
 
-Do this once after installing. It takes a couple of minutes and it is the only
-way to know the thing is collecting your days rather than pretending to.
+**`count`** defaults to the last seven days, ending today. Days are local
+days: timestamps are stored in UTC, and the local day boundaries you give it
+are converted to UTC when querying.
+
+**`version`** prints `dev` unless the binary was built with `just build`, which
+stamps the version from git.
+
+## Where things live
+
+Everything follows the XDG base directory spec:
+
+| What | Where | Override |
+|---|---|---|
+| Database | `~/.local/share/spoor/spoor.db` | `SPOOR_DB`, `XDG_DATA_HOME` |
+| Config — planned, nothing writes it yet | `~/.config/spoor/` | `XDG_CONFIG_HOME` |
+| Claude Code logs, read only | `~/.claude/projects/` | `--claude-dir`, or `CLAUDE_CONFIG_DIR` (read as `$CLAUDE_CONFIG_DIR/projects`) |
+
+If `SPOOR_DB` or `XDG_DATA_HOME` is set, this prints where the database
+actually is:
+
+```
+echo "${SPOOR_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/spoor/spoor.db}"
+```
+
+The commands below spell out the default path. Substitute the one above if
+yours differs.
+
+## Check it works
+
+Do this once after installing; it takes a couple of minutes.
 
 **1. It runs.**
 
@@ -65,9 +121,8 @@ spoor version
 spoor ingest
 ```
 
-Expect three lines: files, events, total. A few seconds for a month of
-history. There is no fourth line about dropped lines — that one appears only
-when something was unreadable, and on healthy data it never does.
+Expect three lines: files, events, total. A month of history takes a few
+seconds. A fourth line appears only when something was unreadable.
 
 **3. The second import, straight after — this is the important one.**
 
@@ -75,15 +130,15 @@ when something was unreadable, and on healthy data it never does.
 spoor ingest
 ```
 
-Expect `0 files read`, `0 new`, the same total as before, and no measurable
-delay. A non-zero `new` is not automatically a bug: if you kept working
-between the two runs, Claude Code appended lines in the meantime. Run it a
-third time; that one must report zero.
+Expect `(0 read, N unchanged)` — N being however many session files you have —
+then `0 new`, the same total as before, and no measurable delay. A non-zero `new` is not necessarily a bug: if you kept
+working between the two runs, Claude Code appended lines in the meantime. Run
+it a third time; that one must report zero.
 
 **4. Re-importing does not inflate a week.**
 
-Pick a week entirely in the past — one that can no longer grow — and count it,
-import again, count again:
+Pick a week entirely in the past — one that can no longer grow — then count
+it, import again, and count again:
 
 ```
 spoor count --from 2026-08-25 --to 2026-08-31
@@ -91,8 +146,7 @@ spoor ingest --quiet
 spoor count --from 2026-08-25 --to 2026-08-31
 ```
 
-Both numbers must be identical. This is the property the whole design rests
-on: a repeated import adds nothing.
+Both numbers must be identical.
 
 **5. Nobody else can read your database.**
 
@@ -100,28 +154,38 @@ on: a repeated import adds nothing.
 ls -l ~/.local/share/spoor/
 ```
 
-Expect `-rw-------` on `spoor.db`. The `-wal` and `-shm` files next to it only
-exist while something has the database open, and carry the same permissions.
-
-If you set `SPOOR_DB` or `XDG_DATA_HOME`, the database is not there — the
-"Removing everything" section below prints the path it is actually at, and the
-same path applies to the next step.
+Expect `-rw-------` on `spoor.db`. The `-wal` and `-shm` files next to it exist
+only while a process has the database open, and carry the same permissions.
 
 **6. Look at what it collected. Do not skip this one.**
+
+Start with whole rows, every column, nothing left out of the view:
+
+```
+python3 -c "import sqlite3,os;d=sqlite3.connect(os.path.expanduser('~/.local/share/spoor/spoor.db'));c=d.execute('SELECT * FROM events ORDER BY ts DESC LIMIT 3');n=[x[0] for x in c.description];[print('\n'.join(f'{k}: '+repr(v) for k,v in zip(n,r)),end='\n\n') for r in c]"
+```
+
+```
+sqlite3 -line ~/.local/share/spoor/spoor.db \
+  'SELECT * FROM events ORDER BY ts DESC LIMIT 3'
+```
+
+That is the whole record. No other table holds event data — `source_files` is
+import bookkeeping: paths, sizes and read offsets, no event content. The
+shorter queries below only trim the view; they hide nothing.
+
+Now the readable summary:
 
 ```
 python3 -c "import sqlite3,os;d=sqlite3.connect(os.path.expanduser('~/.local/share/spoor/spoor.db'));[print(*r,sep=' | ') for r in d.execute('SELECT ts,type,subtype,project,raw_text FROM events ORDER BY ts DESC LIMIT 20')]"
 ```
-
-With the `sqlite3` client installed, the same thing reads better:
 
 ```
 sqlite3 ~/.local/share/spoor/spoor.db \
   'SELECT ts, type, subtype, project, raw_text FROM events ORDER BY ts DESC LIMIT 20'
 ```
 
-Now check the one column that could betray the promise at the top of this
-file. `raw_text` is the only place a leak could hide, so look at its worst
+`raw_text` is the one column where a leak could hide, so look at its worst
 cases rather than its average:
 
 ```
@@ -133,18 +197,24 @@ sqlite3 ~/.local/share/spoor/spoor.db \
   'SELECT DISTINCT raw_text FROM events ORDER BY length(raw_text) DESC LIMIT 10'
 ```
 
-Every value must be one of: a model name, a comma-separated list of tool
-names, `prompt`, `tool_result`, or an attachment kind. Length alone proves
-nothing — MCP tool names look like `mcp__server__some_long_tool_name`, and a
-message calling three of them makes a long and perfectly innocent label. What
-would be a bug is a **sentence**: anything resembling something you typed, a
-reply, or the contents of a file. Report that immediately.
+Every value must be one of: empty, a model name, a comma-separated list of
+tool names, a model name and tool names separated by a space, `prompt`,
+`tool_result`, or the kind of an attachment.
+
+Length proves nothing on its own — MCP tool names look like
+`mcp__server__some_long_tool_name`, so a message that called three of them
+makes a long and perfectly innocent label. An MCP server name can still say
+where you work, so mind that before showing the database to anyone. What would
+be a bug is a **sentence**: anything resembling something you
+typed, a reply, or the contents of a file.
+
+There is no support, but a sentence in `raw_text` is a leak, and that is worth
+an issue. [Open one](https://github.com/vadosdog/spoor-timetracker/issues).
 
 **7. An event outlives the file it came from.**
 
-Claude Code erases its logs after 30 days by default, so this property is the
-whole reason the database exists. Checked here on a copy of one session, in a
-temporary directory — your real logs and your real database are not touched:
+This check runs on a copy of one session, in a temporary directory: your real
+logs and your real database are never touched.
 
 ```
 SPOOR_TMP=$(mktemp -d) && mkdir -p "$SPOOR_TMP/p" && (
@@ -153,63 +223,44 @@ SPOOR_TMP=$(mktemp -d) && mkdir -p "$SPOOR_TMP/p" && (
   spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p" --quiet
   rm "$SPOOR_TMP/p"/*.jsonl
   spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p"
-); rm -rf "$SPOOR_TMP"
+); [ -n "$SPOOR_TMP" ] && rm -rf "$SPOOR_TMP"
 ```
 
 The second import sees no files at all and still reports a non-zero
 `database: N events total`. The source file is gone; the events are not.
 
-The cleanup is deliberately outside the `&&` chain: the copy is a real
-transcript, and it gets removed whether the check succeeded or not.
+The cleanup sits outside the `&&` chain on purpose: the copy is a real
+transcript, and it has to go whether the check passed or not.
 
-## Where things live
+If `CLAUDE_CONFIG_DIR` is set, replace `~/.claude/projects` in the snippet
+with `$CLAUDE_CONFIG_DIR/projects`.
 
-Everything follows the XDG base directory spec:
-
-| What | Where | Override |
-|---|---|---|
-| Database | `~/.local/share/spoor/spoor.db` | `SPOOR_DB`, `XDG_DATA_HOME` |
-| Config — planned, nothing writes it yet | `~/.config/spoor/` | `XDG_CONFIG_HOME` |
-| Claude Code logs (read) | `~/.claude/projects/` | `--claude-dir`, `CLAUDE_CONFIG_DIR` |
-
-The database is meant to be read with your own eyes. No blobs, no serialised
-structs. If you cannot see what the tool collected about you, that is a bug.
-
-## Removing everything
+## Uninstall
 
 `spoor` writes to one directory and nowhere else. It installs no service, no
 timer and no shell hook, so removing it is removing files.
 
 **Before you do: the database is the only copy.** Claude Code deletes its own
 session logs after 30 days by default, so everything imported from further
-back than that exists nowhere else on the machine. Deleting it is not
-undoable.
+back than that exists nowhere else on the machine. There is no undo.
 
 ```
 rm -rf ~/.local/share/spoor    # the database and its -wal / -shm files
 rm -f  ~/.local/bin/spoor      # the binary, wherever you put it
 ```
 
-There is no configuration yet, so nothing ever creates `~/.config/spoor`. If
-you made one by hand, remove that too.
+If `SPOOR_DB` or `XDG_DATA_HOME` is set, the database is not there — print the
+real path with the `echo` above before deleting anything. A custom `SPOOR_DB`
+names the file rather than a directory, so remove its `-wal` and `-shm`
+siblings alongside it.
 
-If you set `SPOOR_DB` or `XDG_DATA_HOME`, the database is where those point
-instead. Print the real path before deleting anything:
-
-```
-echo "${SPOOR_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/spoor/spoor.db}"
-```
-
-A custom `SPOOR_DB` names the file, not a directory, so remove its `-wal` and
-`-shm` siblings alongside it.
+Nothing creates `~/.config/spoor` yet; if you made one by hand, remove that
+too.
 
 To wipe the collected data but keep using the tool, delete only the database.
-The next `spoor ingest` rebuilds it from whatever Claude Code has not yet
-erased — the last 30 days by default, and no more.
+The next `spoor ingest` rebuilds it from whatever Claude Code has not erased
+yet, and no further back.
 
-Nothing in `~/.claude/` is ever written to or deleted by `spoor`; removing it
-is Claude Code's business, not this tool's.
-
-## Licence
+## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
