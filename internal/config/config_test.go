@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func write(t *testing.T, body string) string {
@@ -79,5 +80,54 @@ func TestUnknownKeyIsAnError(t *testing.T) {
 func TestBrokenYAMLIsAnError(t *testing.T) {
 	if _, err := Load(write(t, "browser: [unclosed\n")); err == nil {
 		t.Fatal("broken YAML was accepted")
+	}
+}
+
+// The clustering threshold is a measurement, not a constant, so it lives
+// here. A number nobody can change without rebuilding cannot be remeasured.
+func TestReportThresholds(t *testing.T) {
+	cfg, err := Load(write(t, "report:\n  cluster_gap: 12m\n  attention_window: 90s\n  count_background: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Duration(cfg.Report.ClusterGap); got != 12*time.Minute {
+		t.Errorf("cluster gap %s, want 12m", got)
+	}
+	if got := time.Duration(cfg.Report.AttentionWindow); got != 90*time.Second {
+		t.Errorf("attention window %s, want 1m30s", got)
+	}
+	if !cfg.Report.CountBackground {
+		t.Error("count_background was not read")
+	}
+}
+
+// An absent section means the defaults, which is the state the tool ships in.
+func TestReportDefaultsWhenNothingIsSet(t *testing.T) {
+	cfg, err := Load(write(t, "browser:\n  ignore:\n    - videos.example\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Absent means zero here, and zero is what report.Options turns into the
+	// default. The config layer does not know the default and must not: two
+	// places knowing it is how they come to disagree.
+	if got := time.Duration(cfg.Report.ClusterGap); got != 0 {
+		t.Errorf("cluster gap %s, want nothing at all", got)
+	}
+	if cfg.Report.CountBackground {
+		t.Error("count_background defaulted to on")
+	}
+}
+
+// A duration that is not one is an error naming the line, not a silent zero
+// that would put the threshold back to its default behind your back.
+func TestBadDurationIsAnError(t *testing.T) {
+	for _, body := range []string{
+		"report:\n  cluster_gap: soon\n",
+		"report:\n  cluster_gap: 600\n",
+		"report:\n  cluster_gap: -5m\n",
+	} {
+		if _, err := Load(write(t, body)); err == nil {
+			t.Errorf("%q was accepted", body)
+		}
 	}
 }

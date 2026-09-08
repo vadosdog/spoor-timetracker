@@ -247,6 +247,58 @@ func (s *Store) CountEvents(source string, from, to time.Time) (int, error) {
 	return n, nil
 }
 
+// EventsBetween returns every event with from <= ts < to, oldest first.
+//
+// Every column but `title`. That one holds the page title, which on a search
+// results page is the query somebody typed — the most revealing thing in the
+// database. Nothing downstream needs it, and a value that is never loaded
+// cannot be printed by accident; the day something does need it, this is the
+// line to change, deliberately.
+//
+// The order is total and does not depend on the order the rows were inserted
+// in: two databases holding the same events hand them back the same way, and
+// so does the same database after a re-import. Everything downstream — which
+// block an event lands in, which project owns a second of the day — is decided
+// by walking this slice, so an unstable order here would be an unstable
+// report.
+func (s *Store) EventsBetween(from, to time.Time) ([]event.Event, error) {
+	rows, err := s.db.Query(`
+		SELECT source, external_id, ts, duration_ms, type, subtype,
+		       project, raw_text, session_id, cwd, git_branch,
+		       entrypoint, is_sidechain, client_version,
+		       host, port, path_head
+		FROM events
+		WHERE ts >= ? AND ts < ?
+		ORDER BY ts, source, external_id`,
+		formatTS(from), formatTS(to))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var events []event.Event
+	for rows.Next() {
+		var (
+			e        event.Event
+			duration sql.NullInt64
+		)
+		if err := rows.Scan(
+			&e.Source, &e.ExternalID, &e.TS, &duration, &e.Type, &e.Subtype,
+			&e.Project, &e.RawText, &e.SessionID, &e.CWD, &e.GitBranch,
+			&e.Entrypoint, &e.IsSidechain, &e.ClientVersion,
+			&e.Host, &e.Port, &e.PathHead,
+		); err != nil {
+			return nil, err
+		}
+		if duration.Valid {
+			ms := duration.Int64
+			e.DurationMS = &ms
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // TotalEvents counts everything in the database.
 func (s *Store) TotalEvents() (int, error) {
 	var n int

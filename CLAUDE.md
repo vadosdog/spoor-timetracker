@@ -91,6 +91,7 @@ internal/cli         commands and flags
 internal/config      the optional YAML file under $XDG_CONFIG_HOME
 internal/event       the record every source produces
 internal/store       SQLite: schema, inserts, queries
+internal/report      blocks, attribution, the four numbers, both renderers
 internal/source/…    one package per source: claudecode, browser
 internal/paths       XDG locations
 docs/status.md       where the work stopped and what is next
@@ -137,6 +138,22 @@ Measured, not assumed. Ignoring any of these produces a bug:
   session state, not events. There are thousands. Skip them silently.
 - The same `uuid` can appear in two files when a session is resumed. That is
   one event, not two, which is why `(source, external_id)` is unique.
+- **Cowork sessions in the desktop app write these logs; the chat tab does
+  not.** Everything in `~/.claude/projects` has a working directory, whatever
+  wrote it — `cli`, `claude-vscode` or `claude-desktop`. A conversation in the
+  plain chat tab has no working directory and writes no line here at all;
+  tested by naming a chat and looking for the name, which turns up only in the
+  web app's IndexedDB cache. That cache is conversation content, so it is out
+  of bounds for this project by its own rule, and there is no other local
+  trace. A connector used *inside* a session with a working directory is
+  recorded normally — it is the chat tab that is invisible, not any particular
+  kind of work.
+- **`cwd` is not constant within a session.** A `cd` inside a shell command
+  moves it, so one chat window reports its work under two or more project
+  names. Measured: one session, 1972 events, two names in a day; another, 718
+  events under four. Anything comparing windows — "was the agent working while
+  you were elsewhere" — has to compare `sessionId`, never the project derived
+  from `cwd`.
 - Claude Code **deletes its own logs after 30 days**. The database accumulates
   rather than being rebuilt on demand; an imported event must outlive the file
   it came from. There is a test for exactly that.

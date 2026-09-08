@@ -9,14 +9,21 @@ Today it reads two sources: the session logs Claude Code writes under
 verified; see [Requirements](#requirements). With neither installed there is
 nothing for it to read.
 
+Those session logs are written by anything with a working directory — the CLI,
+the editor extension, a Cowork session in the desktop app. A conversation in
+the desktop app's plain chat tab writes none of them and is invisible here.
+That is not a gap somebody forgot: a chat has no working directory, so there
+would be nothing to name the time after even if the time could be found.
+
 **This is a personal tool, published in the open. It works for its author.
 There are no guarantees, no support and no promises about the next version.**
 
 ## Status
 
-Early. `spoor` can do two things: import those two sources into SQLite, and
-count what it stored for a date range. There is no report, no clustering and
-no interface yet.
+Early. `spoor` imports those two sources into SQLite and reports what a day or
+a week went on: projects, hours, and the evidence for each. It cannot yet be
+told that a block was something other than what it guessed — naming things by
+hand, and an interface to do it in, are still ahead.
 
 [docs/status.md](docs/status.md) says where the work stopped, and lists the
 known rough edges — read it before filing a bug, because the thing you found
@@ -32,9 +39,6 @@ where it now is.
 
 **Next**
 
-- **The report.** Events clustered into blocks, with wall time, attention time
-  and agent time kept apart instead of summed. Four agents working in parallel
-  must not add up to 32 hours in a day.
 - **Projects and rules.** A config mapping paths, branches and domains to
   projects, plus one level below that for something which spans weeks —
   episode 14, level 3, a single feature.
@@ -93,9 +97,10 @@ and this tool does not.
 - **At least one source.** Claude Code, with session logs in
   `~/.claude/projects`; or a browser — see below. Any source that is not
   there is skipped without complaint.
-- **`python3` or the `sqlite3` client** — optional, and only for the
-  inspection step of the check below. Either one will do, and most systems
-  already have one.
+- **`python3` or the `sqlite3` client** — optional, and only for looking
+  inside the database: the inspection step of the check below, and the queries
+  under [The config file](#the-config-file). Either one will do, and most
+  systems already have one.
 
 **Of the browsers, only Google Chrome on Linux has been run against a real
 profile.** That is the whole of what is verified. The Firefox reader is
@@ -129,6 +134,10 @@ this file assumes `spoor` is runnable by name.
 ```
 spoor ingest [--db PATH] [--config PATH] [--claude-dir PATH]
              [--browser-history PATH] [--no-claude-code] [--no-browser] [--quiet]
+spoor report [--day[=YYYY-MM-DD] | --week[=YYYY-MM-DD]] [--json | --table]
+             [--timeline] [--min 5m] [--gap 10m] [--attention-window 5m]
+             [--head 2m] [--tail 2m] [--count-background]
+             [--db PATH] [--config PATH]
 spoor count  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--source NAME] [--db PATH]
 spoor version
 ```
@@ -149,6 +158,160 @@ possible and untested — see [Requirements](#requirements).
 
 A history file you name and `spoor` cannot use — wrong name, or not there —
 is a warning naming the file, not a silent skip and not a failed run.
+
+**`report`** reads the database and nothing else. It touches no source and
+writes nothing — pointed at a path with no database it says so rather than
+creating an empty one — and running it a hundred times changes nothing, which
+is the point of collecting and reporting being separate commands.
+
+```
+spoor report --day=2026-05-04
+```
+
+```
+day 2026-05-04 Monday — traces 09:00 to 12:39
+
+PROJECT       ATTENTION  BACKGROUND  AGENT  WALL  ON WHAT GROUNDS
+payments-api  1:03       0:23        -      1:22  claude-code 40, browser 10; git.example.com/payments-api 9, docs.example.com/guides 1
+checkout-web  0:43       -           0:49   3:39  claude-code 70, browser 5; localhost:3000 5
+(no project)  0:14       -           -      0:12  browser 5; www.example.com/search 5; neighbours disagree: checkout-web or payments-api
+
+attention                              2:00  the column above, summed
+agent worked in the background         0:23  not counted — pass --count-background to add it
+of which written and read              0:10  added by --head and --tail, which are an estimate rather than a measurement
+agent worked while you were elsewhere  0:49  summed per project — two agents can be busy in the same second, so this is not part of the day
+active                                 2:23  of 3:43 from the first block to the last — 64% covered
+```
+
+That day is invented, and so are the domains in it; the shape is what `spoor`
+prints.
+
+With no flags it reports on today. `--day` and `--week` also work bare —
+`spoor report --week` is the Monday-to-Sunday week you are in. A date goes
+with an **equals sign**, because of that: `--day 2026-05-04` written with a
+space is refused rather than quietly treated as today, which would look
+exactly like the right answer.
+
+`--timeline` adds the same day read the other way round — from when to when,
+on what — with the pauses between blocks printed as pauses rather than
+skipped:
+
+```
+timeline
+  08:58-10:24  1:26  payments-api  claude-code 90, browser 10, git.example.com/payments-api, docs.example.com/guides — 0:23 of it the agent alone
+  10:24-11:10  0:46  — nothing —   not counted
+  11:10-11:24  0:14  (no project)  browser 5, www.example.com/search
+  11:24-11:58  0:34  — nothing —   not counted
+  11:58-12:41  0:43  checkout-web  claude-code 20, browser 5, localhost:3000
+```
+
+A line ends where the project you were on changed. With two or three windows
+open that is every few minutes, so a working afternoon is a dozen lines and
+not one.
+
+Over a range of days `spoor report --week` normally ends with a `by day`
+summary — one line per day, attention and background and the hours its traces
+span. `--timeline` replaces that summary with the schedule; the table above it
+stays either way.
+
+Projects holding less than `--min` on every count — five minutes by default —
+are folded into one line rather than each getting a row. Folded, not dropped:
+the line says how many there were, names as many as fit, and carries their
+time, so the column still adds up to the total printed under it. A project
+with no attention but hours of `agent` is never folded, because that is the
+case worth looking at. `--min=0` gives every project a row.
+
+`--json` is not affected by `--min` and prints the same report with every
+block and every line of the timeline in it, the full list of browser keys per
+project, the settings it ran under, and every duration twice — as `H:MM` and
+as milliseconds beside it. Two runs over the same database produce
+byte-identical output; there is a test for that, and step 9 below is how you
+check it yourself.
+
+### What the numbers mean
+
+**Blocks.** Events no further apart than `--gap` — ten minutes by default —
+are one block of work. A pause of exactly the threshold is still one
+block; one second more is two. The pauses *between* blocks are not counted at all: `spoor`
+does not decide whether your lunch was work, so it does not quietly bill it.
+
+A block reaches a little past its own events at both ends, because writing a
+prompt and reading the last answer are real time that leaves no trace:
+`--head` before a block that opens with a prompt, `--tail` after a block that
+had somebody in it at all, two minutes each by default. Both need a person:
+a block of nothing but agent output — a session resumed with its prompt in an
+earlier block — gets neither, because there was nobody there to do the writing
+or the reading. Neither end may take more than half the pause it reaches into,
+so two blocks can never claim the same second.
+
+Unlike the thresholds, these two are somebody's estimate of their own habits
+and not a measurement, so the report says how much they added on a line of its
+own — `of which written and read`. `--head=0 --tail=0` turns them off and gets
+you back to counting only what is on disk.
+
+**Four numbers, deliberately not added together:**
+
+- **attention** — you were at the keyboard, in that project. This is the one
+  that gets summed, and the only one that does.
+- **background** — the agent kept a block of work going across a pause long
+  enough that it would otherwise have ended. Its own line, named for what it
+  is. Not counted unless you pass `--count-background`, which adds a `counted`
+  line at the top of the summary and changes what is summed, never what is
+  measured.
+- **agent** — that project's window was working while you were in a different
+  one. Per project, and *not* part of the day: two agents can be busy in the
+  same second, so this column can add up to more than 24 hours.
+- **wall** — first to last event of that project. Context only. Four chats in
+  parallel give you four wall times and one day of attention, which is the
+  whole reason these are four columns and not one.
+
+A typed prompt and a page your browser recorded are moments of attention; an
+assistant message, a tool result and a subagent's prompt are the machine. Each
+moment casts a window of `--attention-window` either side of itself, the
+windows merge, and active time outside all of them is background.
+
+That window defaults to **half of `--gap`**, and half is the point rather than
+a coincidence: at exactly half, two touches leave a gap between them only when
+they were further apart than the clustering threshold — the pause that would
+have ended the block if the agent had not been filling it. Set it explicitly
+and you get a different meaning, not a better one.
+
+**Which project owns a second is decided by the nearest thing you touched**,
+not by whichever agent spoke. With three windows open the two you are not in
+keep writing, and crediting them with your minutes would hand the day to the
+noisiest agent. Nearest in either direction rather than most recent, because a
+person reads before they answer: the minute before a prompt was spent on the
+thing about to be prompted, not on the thing left behind. And `agent` compares
+*windows*, not project names — one chat changes its own working directory
+whenever a shell command does, and it is still one chat.
+
+**Where a project comes from.** A Claude Code event names its own, from the
+working directory. A browser visit never does. So: a visit takes the project
+of the nearest *prompt* in its block — a prompt, not merely the nearest event
+carrying a project, for the same reason as above, since otherwise the noisiest
+agent gets back in through the browsing. A block holding no prompt at all
+falls back to the nearest event that has a project. And a block with *nothing*
+named in it — which is most browsing — looks at the nearest named block on
+either side:
+
+- both name the same project, or there is only one of them and nothing at all
+  on the far side — the block takes that name. A missing neighbour is not a
+  disagreement: browsing that opens a morning has nothing before it;
+- they name different projects — the block stays `(no project)` and both
+  candidates are printed. Choosing between two is the one thing this rule
+  will not do.
+
+The one-sided case is the weakest rule here, so it does not hide inside the
+total: blocks named that way are `one-neighbour` in `--json`, and the table
+adds a line saying how much of the report rests on them.
+
+None of these numbers is settled, which is why every one of them is a flag and
+a config key rather than a constant. Ten minutes is where the density of
+pauses breaks on two weeks of one person's data, in buckets holding four to
+eleven observations each — the best number available rather than a good one.
+The window follows it. The two minutes of head and tail have no measurement
+under them at all, only somebody's belief about their own habits. Moving any
+of them moves the headline number a long way — try `--gap 15m` and see.
 
 **`count`** defaults to the last seven days, ending today. `--source` takes
 `claude-code` or `browser`. Days are local days: timestamps are stored in UTC,
@@ -188,10 +351,11 @@ echo "${SPOOR_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/spoor/spoor.db}"
 The commands below spell out the default path. Substitute the one above if
 yours differs.
 
-## Ignoring domains
+## The config file
 
-There is no config file until you make one, and `spoor` never writes it. The
-only thing it holds today is the browser source:
+There is no config file until you make one, and `spoor` never writes it. It
+holds two sections today — the browser source, and the thresholds the report
+is built on:
 
 ```yaml
 # ~/.config/spoor/config.yaml
@@ -204,7 +368,38 @@ browser:
     # a restored backup. Another browser's file can be named here too, with
     # the caveat under Requirements: untried, and not supported.
     - /mnt/backup/google-chrome/Profile 1/History
+
+report:
+  # Pauses shorter than this are the same block of work.
+  cluster_gap: 10m
+  # How far either side of a prompt or a page you count as being there.
+  # Left out, it follows the gap: half of it.
+  attention_window: 5m
+  # Writing a prompt, and reading the last answer. Set either to 0s to count
+  # only what actually left a trace.
+  head: 2m
+  tail: 2m
+  # Add the agent's own time to the totals. Off by default.
+  count_background: false
 ```
+
+Every key under `report` is also a flag on `spoor report` — `--gap`,
+`--attention-window`, `--head`, `--tail`, `--count-background` — and the flag
+wins for that run.
+
+All four durations are written the way a person writes one: `10m`, `90s`,
+`1h30m`, and a negative one is an error rather than a silent fall back to the
+default.
+
+Zero is where they part company. For `cluster_gap` and `attention_window`,
+`0s` means the default, exactly as leaving the key out does: a threshold of
+nothing would make every event a block of its own, which nobody means by
+writing zero, and there would then be no way left to ask for the default. For
+`head` and `tail`, `0s` means zero — "add no time I cannot see" has to be
+sayable, and it is the whole point of having them configurable. The flags
+behave the same way as the keys.
+
+### Ignoring domains
 
 **`ignore`** is a list of domains that are never imported. An entry covers the
 host itself and every subdomain of it, so `example.com` also covers
@@ -254,16 +449,38 @@ results page carries your query in its title, and there is no rule that can
 tell a work search from a private one. If a domain's titles are nobody's
 business, the domain belongs on this list.
 
+**And on a few hosts the secret is the first path segment itself.** Nothing
+below it is ever stored, which keeps `/reset-password/<token>` safe — but that
+rule does not generalise upwards. `api.telegram.org/bot<token>` puts a bot's
+credential in segment one; so do `meet.google.com/<code>`, `forms.gle/<id>`, a
+link shortener's slug and a payment QR redirect. `spoor` cannot tell those
+from a project name, and the ignore list is the only control there is. Look
+for them before the first import:
+
+```
+python3 -c "import sqlite3,os;d=sqlite3.connect(os.path.expanduser('~/.local/share/spoor/spoor.db'));[print(r[0],'|',r[1]) for r in d.execute(\"SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 20 ORDER BY host\")]"
+```
+
+```
+sqlite3 ~/.local/share/spoor/spoor.db \
+  "SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 20 ORDER BY host"
+```
+
+Long is not the same as secret — an article slug is long and harmless — but
+everything that *is* a secret in that column will be in this list. A host that
+turns one up belongs on `ignore`, and the rows already imported have to be
+deleted by hand — the two `DELETE` snippets earlier in this section do that,
+with the host substituted.
+
 **`history`** adds history databases to the ones found automatically — for a
 browser installed somewhere unusual, or one `spoor` has never heard of. A
-file named `History` is read as Chrome, one named `places.sqlite` as Firefox;
-whether some other browser's file of that name actually reads is untested.
+file named `History` is read as Chrome, one named `places.sqlite` as Firefox.
 This is the additive version of `--browser-history`; that flag replaces both
 the search and this list for the run it is given on.
 
-A misspelled key is an error rather than a setting that silently does nothing:
-an ignore list that is quietly not applied is the worst thing this file could
-do.
+A misspelled key anywhere in this file is an error rather than a setting that
+silently does nothing — for the reason given above, and because a threshold
+that quietly stayed at its default would be just as invisible.
 
 ## Check it works
 
@@ -487,6 +704,41 @@ Firefox, substitute `~/.mozilla/firefox/*/places.sqlite`.
 Do this with the browser closed. With it running, the browser can change its
 own history between the two `ls` calls, and then the check tells you about
 the browser rather than about `spoor`.
+
+**9. The report says the same thing twice.**
+
+Reproducibility is the promise the whole design rests on, and it is one
+`cmp` away from being checked rather than believed:
+
+```
+spoor report --week --json > /tmp/spoor-1.json
+spoor report --week --json > /tmp/spoor-2.json
+cmp /tmp/spoor-1.json /tmp/spoor-2.json && echo identical
+rm /tmp/spoor-1.json /tmp/spoor-2.json
+```
+
+`cmp` prints nothing when two files match, so the only output must be the
+word `identical`. Run `spoor ingest` in between and the two will differ, which
+is correct: the events changed.
+
+Then read the table for a day you remember:
+
+```
+spoor report --day
+```
+
+`attention` is never larger than `active`, and `active` is never larger than
+the span it is quoted against — those are what the arithmetic guarantees. What
+it cannot guarantee is that the projects are yours: `(no project)` is time
+nothing could name, and a project appearing twice under two names is
+`basename(cwd)` doing what it does until the dictionary arrives.
+
+If a project shows `agent` time and no time of yours at all — neither
+attention nor background — the report names it in a paragraph under the
+summary. Nothing starts an agent but a person, so that combination means
+either something ran unattended or — far more often — one chat window is being
+counted under two names, because a shell command that changes directory
+changes what the session calls itself.
 
 ## Uninstall
 

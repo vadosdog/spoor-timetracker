@@ -11,6 +11,7 @@ package cli
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -346,5 +347,321 @@ func TestBadDateIsReportedNotGuessed(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "YYYY-MM-DD") {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// fails runs a command that is expected not to work, and returns everything
+// it said. A flag that is wrong has to say so: the alternative is a report
+// about the wrong day that looks exactly like a report about the right one.
+func fails(t *testing.T, args ...string) string {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := Run(args, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("spoor %s was expected to fail; it printed %s", strings.Join(args, " "), out.String())
+	}
+	return out.String() + errOut.String()
+}
+
+// reportArgs points every default somewhere harmless. Without --config the
+// command would read the config of whoever is running the tests.
+func reportArgs(t *testing.T, db string, extra ...string) []string {
+	t.Helper()
+	return append([]string{
+		"report", "--db", db, "--config", filepath.Join(t.TempDir(), "no-config.yaml"),
+	}, extra...)
+}
+
+func reportFixture(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "projects")
+	db := filepath.Join(tmp, "spoor.db")
+	week(t, src, time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local), 7)
+	ingest(t, db, src, "--quiet")
+	return db
+}
+
+// reportJSON runs the report and reads the numbers out of it. The table pads
+// its columns with spaces, so matching a duration in it matches whichever
+// column happens to hold that string — which is how three tests here once
+// passed while asserting the wall clock and calling it attention.
+func reportJSON(t *testing.T, db string, extra ...string) struct {
+	Options struct {
+		ClusterGap      string `json:"cluster_gap"`
+		AttentionWindow string `json:"attention_window"`
+		Head            string `json:"head"`
+		Tail            string `json:"tail"`
+		CountBackground bool   `json:"count_background"`
+	} `json:"options"`
+	Range struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+		Days int    `json:"days"`
+	} `json:"range"`
+	Total struct {
+		AttentionMS int64 `json:"attention_ms"`
+		ActiveMS    int64 `json:"active_ms"`
+		PaddingMS   int64 `json:"padding_ms"`
+		Projects    []struct {
+			Project     string `json:"project"`
+			AttentionMS int64  `json:"attention_ms"`
+			WallMS      int64  `json:"wall_ms"`
+		} `json:"projects"`
+	} `json:"total"`
+} {
+	t.Helper()
+	var out struct {
+		Options struct {
+			ClusterGap      string `json:"cluster_gap"`
+			AttentionWindow string `json:"attention_window"`
+			Head            string `json:"head"`
+			Tail            string `json:"tail"`
+			CountBackground bool   `json:"count_background"`
+		} `json:"options"`
+		Range struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+			Days int    `json:"days"`
+		} `json:"range"`
+		Total struct {
+			AttentionMS int64 `json:"attention_ms"`
+			ActiveMS    int64 `json:"active_ms"`
+			PaddingMS   int64 `json:"padding_ms"`
+			Projects    []struct {
+				Project     string `json:"project"`
+				AttentionMS int64  `json:"attention_ms"`
+				WallMS      int64  `json:"wall_ms"`
+			} `json:"projects"`
+		} `json:"total"`
+	}
+	args := append(reportArgs(t, db, "--json"), extra...)
+	if err := json.Unmarshal([]byte(run(t, args...)), &out); err != nil {
+		t.Fatalf("report --json did not parse: %v", err)
+	}
+	return out
+}
+
+// A day of the synthetic week is two prompts a minute apart. With the default
+// head and tail that is five minutes of attention — two before the first
+// prompt, one between them, two after the last — all of it on one project.
+func TestReportDay(t *testing.T) {
+	db := reportFixture(t)
+	got := reportJSON(t, db, "--day=2026-08-26")
+
+	if len(got.Total.Projects) != 1 || got.Total.Projects[0].Project != "widget" {
+		t.Fatalf("projects %+v, want one called widget", got.Total.Projects)
+	}
+	if want := int64(5 * 60 * 1000); got.Total.Projects[0].AttentionMS != want {
+		t.Errorf("widget attention %d ms, want %d", got.Total.Projects[0].AttentionMS, want)
+	}
+	// The wall clock is the minute between the two events and nothing else,
+	// which is exactly the number the old version of this test was reading
+	// out of the table and calling attention.
+	if want := int64(60 * 1000); got.Total.Projects[0].WallMS != want {
+		t.Errorf("widget wall %d ms, want %d", got.Total.Projects[0].WallMS, want)
+	}
+	if got.Total.PaddingMS != int64(4*60*1000) {
+		t.Errorf("padding %d ms, want four minutes", got.Total.PaddingMS)
+	}
+
+	// And the table names the project and says what it is based on.
+	out := run(t, reportArgs(t, db, "--day=2026-08-26")...)
+	for _, want := range []string{"day 2026-08-26", "widget", "claude-code 2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the day report does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
+// A week is the sum of its days and nothing else. The fixture starts on the
+// Tuesday, so the Monday of that week is empty and six days of five minutes
+// each are thirty minutes.
+func TestReportWeek(t *testing.T) {
+	db := reportFixture(t)
+	got := reportJSON(t, db, "--week=2026-08-26")
+
+	if got.Range.From != "2026-08-24" || got.Range.To != "2026-08-30" || got.Range.Days != 7 {
+		t.Errorf("range %+v, want Monday 2026-08-24 to Sunday 2026-08-30", got.Range)
+	}
+	if want := int64(6 * 5 * 60 * 1000); got.Total.AttentionMS != want {
+		t.Errorf("week attention %d ms, want %d", got.Total.AttentionMS, want)
+	}
+
+	out := run(t, reportArgs(t, db, "--week=2026-08-26")...)
+	if !strings.Contains(out, "Mon 2026-08-24  attention -") {
+		t.Errorf("the empty Monday is missing from the by-day list:\n%s", out)
+	}
+	if strings.Contains(out, "2026-08-31") {
+		t.Errorf("the week ran past its Sunday:\n%s", out)
+	}
+}
+
+// With no flags at all it reports on today, which for a database of last
+// August means saying so rather than printing nothing.
+func TestReportDefaultsToToday(t *testing.T) {
+	db := reportFixture(t)
+	out := run(t, reportArgs(t, db)...)
+	if !strings.Contains(out, time.Now().Format(time.DateOnly)) {
+		t.Errorf("the default report is not about today:\n%s", out)
+	}
+}
+
+// The date goes with an equals sign, because --day also works on its own.
+// Written with a space it is not a value, and reporting on today instead
+// would be the one answer nobody could spot.
+func TestADateWrittenWithASpaceIsRefused(t *testing.T) {
+	db := reportFixture(t)
+	out := fails(t, reportArgs(t, db, "--day", "2026-08-26")...)
+	if !strings.Contains(out, "equals sign") {
+		t.Errorf("the message does not say how to write it:\n%s", out)
+	}
+}
+
+func TestDayAndWeekTogetherAreRefused(t *testing.T) {
+	db := reportFixture(t)
+	if out := fails(t, reportArgs(t, db, "--day", "--week")...); !strings.Contains(out, "pick one") {
+		t.Errorf("unhelpful message:\n%s", out)
+	}
+	if out := fails(t, reportArgs(t, db, "--json", "--table")...); !strings.Contains(out, "pick one") {
+		t.Errorf("unhelpful message:\n%s", out)
+	}
+}
+
+// The invariant, end to end: two runs over the same database produce the same
+// JSON byte for byte.
+func TestReportJSONIsByteIdentical(t *testing.T) {
+	db := reportFixture(t)
+	first := run(t, reportArgs(t, db, "--week=2026-08-26", "--json")...)
+	for i := 0; i < 5; i++ {
+		if again := run(t, reportArgs(t, db, "--week=2026-08-26", "--json")...); again != first {
+			t.Fatalf("run %d differs:\n%s\n---\n%s", i, first, again)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(first), &parsed); err != nil {
+		t.Fatalf("the JSON does not parse: %v", err)
+	}
+}
+
+// The threshold is reachable without rebuilding. Two events a minute apart
+// stop being one block as soon as the gap is smaller than the pause — and
+// with nothing added at the ends, that leaves no time at all.
+func TestReportThresholdIsAFlag(t *testing.T) {
+	db := reportFixture(t)
+	bare := []string{"--day=2026-08-26", "--head=0", "--tail=0"}
+
+	whole := reportJSON(t, db, bare...)
+	if want := int64(60 * 1000); whole.Total.ActiveMS != want {
+		t.Fatalf("active %d ms, want the one minute between the two events", whole.Total.ActiveMS)
+	}
+	split := reportJSON(t, db, append(bare, "--gap=30s")...)
+	if split.Total.ActiveMS != 0 {
+		t.Errorf("at a thirty second gap the minute was still counted: %d ms", split.Total.ActiveMS)
+	}
+}
+
+// The attention window follows the threshold rather than a constant of its
+// own, all the way through the command rather than only inside Build. This is
+// the path a person actually takes, and it is where the two came apart.
+func TestTheWindowFollowsTheGapThroughTheCommand(t *testing.T) {
+	db := reportFixture(t)
+
+	if got := reportJSON(t, db, "--day=2026-08-26").Options; got.AttentionWindow != "5m0s" {
+		t.Errorf("attention window %q at the default gap, want 5m0s", got.AttentionWindow)
+	}
+	if got := reportJSON(t, db, "--day=2026-08-26", "--gap=20m").Options; got.AttentionWindow != "10m0s" {
+		t.Errorf("attention window %q at a twenty minute gap, want half of it", got.AttentionWindow)
+	}
+	// Through the config file as well, which is the other way in.
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfg, []byte("report:\n  cluster_gap: 30m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := run(t, "report", "--db", db, "--config", cfg, "--day=2026-08-26", "--json")
+	if !strings.Contains(out, `"attention_window": "15m0s"`) {
+		t.Errorf("a gap from the config did not move the window:\n%s", out)
+	}
+	// And an explicit window still wins over both.
+	if got := reportJSON(t, db, "--day=2026-08-26", "--gap=20m", "--attention-window=1m").Options; got.AttentionWindow != "1m0s" {
+		t.Errorf("attention window %q, want the one that was asked for", got.AttentionWindow)
+	}
+}
+
+// A flag beats the config, including when it turns something off.
+func TestAFlagCanTurnOffAConfigSetting(t *testing.T) {
+	db := reportFixture(t)
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfg, []byte("report:\n  count_background: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	on := run(t, "report", "--db", db, "--config", cfg, "--day=2026-08-26", "--json")
+	if !strings.Contains(on, `"count_background": true`) {
+		t.Errorf("the config setting was not read:\n%s", on)
+	}
+	off := run(t, "report", "--db", db, "--config", cfg, "--day=2026-08-26", "--json", "--count-background=false")
+	if !strings.Contains(off, `"count_background": false`) {
+		t.Errorf("--count-background=false could not turn the config setting off:\n%s", off)
+	}
+}
+
+// Reporting is reading. Pointed at a path with no database, it says so instead
+// of leaving an empty one behind and cheerfully finding nothing in it.
+func TestReportDoesNotCreateADatabase(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nothing-here.db")
+	out := fails(t, "report", "--db", missing,
+		"--config", filepath.Join(t.TempDir(), "no-config.yaml"), "--day=2026-08-26")
+	if !strings.Contains(out, "spoor ingest") {
+		t.Errorf("the message does not say what to do:\n%s", out)
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Error("a report created a database")
+	}
+}
+
+// --day=false is not "no day": it would report on today, which is the answer
+// nobody could tell from the right one.
+func TestDayFalseIsRefused(t *testing.T) {
+	db := reportFixture(t)
+	if out := fails(t, reportArgs(t, db, "--day=false")...); !strings.Contains(out, "YYYY-MM-DD") {
+		t.Errorf("unhelpful message:\n%s", out)
+	}
+}
+
+// A negative duration is a typo, not a way of asking for the default — for
+// every one of them, not just the one somebody remembered to test. The config
+// refuses the same thing, so the same mistake means the same thing wherever it
+// is typed.
+func TestNegativeDurationsAreRefused(t *testing.T) {
+	db := reportFixture(t)
+	for _, flag := range []string{"--gap", "--attention-window", "--head", "--tail", "--min"} {
+		out := fails(t, reportArgs(t, db, "--day=2026-08-26", flag+"=-5m")...)
+		if !strings.Contains(out, "zero or more") {
+			t.Errorf("%s: unhelpful message:\n%s", flag, out)
+		}
+		if !strings.Contains(out, flag) {
+			t.Errorf("%s: the message does not name the flag:\n%s", flag, out)
+		}
+	}
+}
+
+// Reporting reads and never writes. Collecting and reporting being separate
+// commands is only worth anything if the second one cannot damage the first.
+func TestReportDoesNotChangeTheDatabase(t *testing.T) {
+	db := reportFixture(t)
+	before, err := os.Stat(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, reportArgs(t, db, "--week=2026-08-26")...)
+	run(t, reportArgs(t, db, "--week=2026-08-26", "--json")...)
+	after, err := os.Stat(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("the database changed: %d bytes at %s, then %d at %s",
+			before.Size(), before.ModTime(), after.Size(), after.ModTime())
 	}
 }

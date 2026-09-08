@@ -9,6 +9,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -355,5 +356,96 @@ func TestOpenIsIdempotent(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("total = %d after reopening, want 1", total)
+	}
+}
+
+// The report is built by walking events in order, so the order has to be the
+// same every time — including for two events that share a timestamp, which
+// happens whenever two sessions are busy at once.
+func TestEventsBetweenIsOrdered(t *testing.T) {
+	st := open(t)
+
+	same := "2026-05-04T09:00:00.000Z"
+	if _, err := st.InsertEvents([]event.Event{
+		{Source: "browser", ExternalID: "b2", TS: same, Type: "visit"},
+		{Source: "claude-code", ExternalID: "c1", TS: "2026-05-04T08:00:00.000Z", Type: "user"},
+		{Source: "browser", ExternalID: "b1", TS: same, Type: "visit"},
+		{Source: "claude-code", ExternalID: "c2", TS: same, Type: "user"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC)
+	got, err := st.EventsBetween(from, from.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, e := range got {
+		ids = append(ids, e.ExternalID)
+	}
+	// By time, then by source, then by the source's own id.
+	if want := "[c1 b1 b2 c2]"; fmt.Sprint(ids) != want {
+		t.Errorf("order %v, want %s", ids, want)
+	}
+}
+
+// The range is the same half-open one count uses: the lower bound is in, the
+// upper bound is not.
+func TestEventsBetweenBounds(t *testing.T) {
+	st := open(t)
+	if _, err := st.InsertEvents([]event.Event{
+		{Source: "claude-code", ExternalID: "before", TS: "2026-05-03T23:59:59.999Z", Type: "user"},
+		{Source: "claude-code", ExternalID: "first", TS: "2026-05-04T00:00:00.000Z", Type: "user"},
+		{Source: "claude-code", ExternalID: "last", TS: "2026-05-04T23:59:59.999Z", Type: "user"},
+		{Source: "claude-code", ExternalID: "after", TS: "2026-05-05T00:00:00.000Z", Type: "user"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC)
+	got, err := st.EventsBetween(from, from.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ExternalID != "first" || got[1].ExternalID != "last" {
+		t.Errorf("got %d events: %+v", len(got), got)
+	}
+}
+
+// The page title is the one column that can hold a search query, and nothing
+// downstream of here has any use for it. Not loading it at all is a second
+// line of defence behind "the renderers do not print it": a value that never
+// arrives cannot be printed by accident, and this is the test that notices if
+// somebody puts it back.
+func TestEventsBetweenDoesNotLoadTitles(t *testing.T) {
+	st := open(t)
+	if _, err := st.InsertEvents([]event.Event{{
+		Source: "browser", ExternalID: "v1", TS: "2026-05-04T09:00:00.000Z",
+		Type: "visit", Host: "search.test", PathHead: "q",
+		Title: "a search query nobody downstream should receive",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC)
+	got, err := st.EventsBetween(from, from.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Title != "" {
+		t.Errorf("EventsBetween loaded the title %q", got[0].Title)
+	}
+	// And the row itself still has it: this is about what is read, not about
+	// what is kept.
+	var stored string
+	if err := st.DB().QueryRow(`SELECT title FROM events WHERE external_id = 'v1'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == "" {
+		t.Error("the title was not stored at all; this test would pass for the wrong reason")
 	}
 }

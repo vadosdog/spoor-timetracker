@@ -472,10 +472,272 @@ accounted for, not absorbed: it is the non-web visits described below.
   quite agree: Firefox distinguishes a permanent redirect from a temporary
   one, Chrome does not. Anything filtering on it has to know both.
 
-## Next: the report
+## Stage 2 — the report. Done 2026-09-08.
 
-Clustering events into blocks with the 10 minute threshold from the survey,
-in the config rather than in a constant. Three times kept apart — wall,
-attention, agent — and a browser-only cluster inheriting its project from its
-neighbours in time, which is what half the clusters of a day need before any
-of them can be named.
+`spoor report` turns stored events into a day or a week: which projects, how
+many hours, and on what grounds. `--json` for anything that wants to read it,
+`--table` (the default) for a terminal.
+
+Nothing was added to the database and no source was touched. Collecting and
+reporting are separate commands precisely so that the rules below can be
+argued with and re-run over the same events until they stop being wrong.
+
+### What is in place
+
+- `internal/report` — blocks, the attribution ladder, the four numbers, the
+  timeline, and both renderers.
+- `internal/config` grew a `report` section: `cluster_gap`,
+  `attention_window`, `head`, `tail`, `count_background`. Every one of them is
+  also a flag, and the flag wins for that run.
+- `internal/cli` grew `report`, with `--day`/`--week`, `--json`/`--table`,
+  `--timeline` and `--min` on top of the five above.
+- `internal/store` grew `EventsBetween`, which hands events back in a total
+  order that does not depend on the order they were inserted in.
+
+### The shape of a day
+
+Four rules, all crude, all written by hand, none of them clever:
+
+1. **Blocks.** Events no further apart than `cluster_gap` — ten minutes by
+   default — are one block of work. Time inside a block is *active*; the
+   pauses between blocks are not time at all. A block never crosses local
+   midnight, so a day has the same numbers whether it is asked about on its
+   own or as part of a week.
+
+   A block reaches past its own events at both ends: `head` before one that
+   opens with a typed prompt, `tail` after one that had a human touch in it
+   anywhere, two minutes each by default. Writing a prompt and reading the
+   last answer are real time that leaves no trace, and without them a block of
+   a single event lasts zero. Both need a person: a block of nothing but agent
+   output gets neither.
+   Neither end takes more than half the pause it reaches into, so two blocks
+   cannot claim the same second whatever the settings; neither crosses
+   midnight; and both are attention outright rather than by the window,
+   because they exist precisely because a person was typing or reading. These
+   two numbers are an estimate of one person's habits rather than a
+   measurement, so zero is expressible and gets you back to counting only
+   what is on disk.
+2. **Cutting.** The stretch between two adjacent events belongs to the project
+   of the nearest human touch — a prompt somebody typed, or a page their
+   browser recorded — with a tie going to the earlier one. A block holding two
+   projects is cut between them and never handed to the larger one, which is
+   what makes "at any instant, exactly one project" true by construction
+   rather than by hope.
+
+   Nearest *touch*, not nearest event, and that distinction is the whole of
+   it. With two or three windows open — the normal way to work with agents —
+   the agents you are not talking to keep writing, and taking the project of
+   whatever spoke last hands your minutes to whichever agent is noisiest. On
+   real data the owner changed 1522 times in a fortnight under that rule and
+   132 under this one, and 9% of the hours moved. Nearest rather than most
+   recent because a person reads before they answer: the minute before a
+   prompt was spent on the thing about to be prompted.
+3. **Inheritance.** An event with no project of its own takes the project of
+   the nearest *prompt* in its block, falling back to the nearest event
+   carrying a project when the block holds no prompt at all — a resumed
+   session, or one whose prompt fell in an earlier block. Prompts rather than
+   any named event for the same reason as rule 2: browsing is a human touch
+   and owns the seconds around it, so naming it after whichever agent spoke
+   nearest would let the noisiest one back in through the side door. A block
+   where *nothing* is named —
+   about half of them, all browsing — looks at the nearest named block on
+   either side. Both naming the same project, or one neighbour with nothing
+   at all on the far side, and the block takes that name; two neighbours
+   naming different projects, and it stays unnamed with both candidates
+   printed. A missing neighbour is not a disagreement. Neither rule ever
+   inherits from something inherited, so the answer does not depend on the
+   order blocks are visited in.
+4. **Attention.** A prompt somebody typed and a page somebody's browser
+   recorded are moments of human attention; an assistant message, a tool
+   result and a subagent's prompt are the machine. Each moment casts a window
+   of `attention_window` either side of itself, the windows merge, and active
+   time inside them is *attention*. What is left is the agent working alone.
+
+### Four numbers, kept apart
+
+```
+attention   active time inside an attention window. The one that is summed
+background  active time outside every window: the agent kept a block together
+            across a pause that would otherwise have ended it. Its own line,
+            named for what it is, and not added in unless asked
+agent       this project's window was producing output while you were in a
+            different one. Per project, and not part of the day: two agents
+            can be busy in the same second
+wall        first to last event of a project. Context, never a total: four
+            parallel chats give four wall times and one day of attention
+```
+
+`attention` and `background` partition the active time. `agent` and `wall` do
+not: both are summed per project and both can exceed a day, on purpose.
+
+**`agent` compares sessions, not project names.** One chat window changes its
+own `cwd` when a shell command does — measured: one session, 1972 events, two
+project names in a day — so comparing names would report "the agent worked
+while you were elsewhere" about the window you never left.
+
+The attention window follows the clustering threshold: half of it, unless set
+explicitly. At exactly half, two touches leave no background between them
+precisely when they are no further apart than the threshold — which gives the
+background line one meaning instead of a number of them: the agent held a
+block together across a pause that would otherwise have ended it.
+
+One more line joins the summary when `head` or `tail` put time there:
+`of which written and read`, and `padding_ms` in `--json`. It is inside
+attention already, not beside it. It is called out because it is the only part
+of the day that was not measured.
+
+`--count-background` changes what is summed and never what is measured: the
+background line is printed either way.
+
+`--timeline` adds the same day as a schedule under the table: one line per
+stretch with a single owner, and the pauses between blocks as lines of their
+own. It replaces the day-by-day summary, not the table itself. A line ends
+where the project changed, so a day of two or three open windows comes out as
+a few dozen lines rather than one per event.
+
+### Invariants, proven by tests rather than by eye
+
+| Invariant | Test |
+|---|---|
+| Attention over all projects sums to the active time, and a day cannot hold more than a day | `TestAttentionSumsToActiveTime`, `TestParallelSessionsCannotExceedADay` |
+| At one instant, attention belongs to exactly one project | `TestMixedBlockIsCutNotRounded` |
+| Two runs over the same data give byte-identical `--json` | `TestJSONIsByteIdentical`, `TestReportJSONIsByteIdentical` |
+| …including when the events arrive in a different order | `TestJSONIsByteIdenticalWhateverTheInputOrder`, `TestInputOrderDoesNotMatter` |
+| A day is the same day inside a week | `TestADayIsTheSameInsideAWeek` |
+| Reporting never writes to the database | `TestReportDoesNotChangeTheDatabase` |
+
+The parallel-sessions test is the one worth keeping honest: it builds four
+projects producing an event every thirty seconds from midnight to midnight —
+the "four agents, thirty-two hours" case the whole design exists for — and
+asserts the day still holds a day.
+
+### Acceptance
+
+Measured against a real database over the same two-week window the survey
+used. The absolute numbers live outside this repository with the rest of the
+measurements; the shape of the result is:
+
+| Check | Result |
+|---|---|
+| `active`, with `--head=0 --tail=0`, against the hours stage 1.5 measured | the same total to the digit, over the thirteen closed days both cover |
+| Share of the day from the first block to the last that blocks fill | 37%, from 8% on the quietest day to 68% on the busiest; 34% with the head and tail turned off |
+| Time in single-project blocks, before and after inheritance | 31% to 44% |
+| Time with no project at all, before and after inheritance | 16% to 3% |
+| Time in blocks whose main project holds less than 70% | 27% |
+| Of the active time, how much rests on a one-sided neighbour | 9% |
+
+The last three lines are the point of the stage and they say something
+uncomfortable: inheritance names four fifths of the unnamed time, and a block
+still is not a project.
+
+### What is deliberately not done
+
+- **Conversations in the desktop app's chat tab are not covered, and cannot
+  be.** Cowork sessions write to `~/.claude/projects` like any other Claude
+  Code session and are read normally. A plain chat has no working directory
+  and writes nothing there; the only local trace is the web app's IndexedDB
+  cache, which is the text of the conversation and therefore out of bounds
+  here. Tested by naming a chat and searching the disk for that name: nothing
+  outside that cache. So work done entirely in chat — including through a
+  connector — is missing from the day, and it would have no project even if
+  it were not, because the project comes from the working directory. It is
+  the same shape of hole as a meeting.
+- **No dictionary.** A project is still `basename(cwd)` plus inheritance.
+  Mapping a domain or a path to a project by hand is the next stage, and the
+  reason it comes second is that the busiest browser keys — one search engine
+  accounts for a sixth of all browsing — can only be judged once you can see
+  what is left unnamed after inheritance.
+- **`turn_duration` is still unused.** It is the only honest duration in the
+  data, and adding it would double count: the gap between the events around
+  it already covers the same wall time.
+- **Nothing is written back.** A block cannot be named, split or confirmed;
+  that is the terminal interface, one stage further on.
+- **Windows between blocks are shown but not stored.** `--timeline` prints
+  each one as a line of its own and `--json` carries them as runs marked
+  `gap`, so blocks plus windows do add up to the length of the day on screen.
+  Nothing about them is written down, though: they cannot be named, confirmed
+  or turned into "that was work after all". The survey argues they should be
+  records in their own right, and that is still not done.
+
+### Loose ends for whoever comes next
+
+- **The attention window barely separates anything at its default.** At half
+  the clustering threshold — five minutes either side, by default —
+  background is under a tenth of active time on real data. That is not the
+  rule failing: browsing counts as attention, and a person waiting on an
+  agent browses, so stretches of ten minutes with neither a prompt nor a
+  visit are rare. At one minute either side the split becomes roughly even,
+  but it also stops meaning the same thing: two minutes since your last
+  keystroke is you reading, not the agent working alone. Whichever number is
+  right, the default makes the background line nearly always small, and it
+  should not be read as "the agent barely worked alone".
+- **Every browser visit counts as a moment of attention**, including a
+  redirect and a frame load. Telling those apart needs each browser's own
+  transition vocabulary and the two do not agree; on real data it is a
+  rounding error, but a page that refreshes itself every minute would hold
+  the attention window open all night.
+- **A one-sided neighbour names about a tenth of the day, and cannot be
+  checked.** Browsing at the edge of a day has a named block on one side and
+  nothing on the other, so there is nothing to agree or disagree with it. The
+  first version of the rule refused those and left three quarters of the
+  unnamed time unnamed for want of a neighbour that could not exist; this one
+  accepts them and reports how much it accepted. Neither version is
+  verifiable from the data — evening reading really can belong to something
+  else, and only the person who did it knows.
+- **The report is what made the first-path-segment risk visible, and it is
+  real.** Stage 1.5 wrote down that `/reset-password/<token>` is safe while
+  `meet.google.com/<code>` is not, because for some hosts the secret *is*
+  segment one. Grouping browser events by host and first segment put one of
+  those on screen: a Telegram Bot API credential, which lives at
+  `api.telegram.org/bot<token>`, had been imported and was printed in the
+  evidence column. Nothing is wrong with the truncation — the rule kept
+  exactly what it promised to keep — and the ignore list is still the only
+  control. What changed is that the risk is now demonstrated rather than
+  predicted, and the README says so with a query for finding such hosts.
+- **`basename(cwd)` is wrong in both directions at once.** It splits one
+  project into two — a checkout and a subdirectory opened separately are two
+  names, and worse, a single chat window changes its own `cwd` when a shell
+  command does, so one session reports under several names. And it merges
+  what should stay apart: two unrelated directories both called `src` or
+  `out` become one project. The dictionary has to fix both, and the two pull
+  in opposite directions. The full path is in `cwd` already; nothing uses it.
+- **`head` and `tail` are an estimate, not a measurement.** Two minutes each
+  is what one person believes about their own habits; the clustering
+  threshold has a knee in a density curve under it and these have nothing.
+  They move the day by 9%. The honest measurement that could replace them is
+  in the data already — `durationMs` on `system/turn_duration` — and nothing
+  reads it.
+- **A block that opens with browsing gets no head.** Typing an address is not
+  composing a prompt, so the rule only fires on Claude Code prompts. On real
+  data that is why the two together add a little over half of what four
+  minutes a block would give.
+- **`--min` folds by three columns at once**, so a project stays if it is
+  large on any of them. That keeps the "agent worked and you never did" case
+  visible, which is the one worth reading, but it does mean the fold catches
+  less than a threshold on attention alone would. On real data it takes a
+  week from 33 rows to 23.
+- **Wall for the unnamed row is the whole day.** It is the first to the last
+  unnamed event, which for scattered browsing is breakfast to bedtime. True
+  by the definition and useless as a number.
+- **A project with events but no time gets a row of zeros.** A single visit
+  is a point, and a point has no duration. `--min` folds those away by
+  default, which means the honest answer is one flag further from the reader
+  than the tidy one.
+- **The `--day` and `--week` flags take their date with an equals sign**,
+  because both also work bare. Written with a space the date is a leftover
+  argument; that is refused with a message rather than quietly reported on
+  today, which would have been indistinguishable from the right answer.
+- **The clustering threshold has not been re-measured, and cannot be yet.**
+  Ten minutes comes from buckets holding four to eleven observations. Taking
+  it again needs a longer window than Claude Code keeps, which is the whole
+  reason the database accumulates — so the number improves only with time
+  passing. Everything else is stated against it: the attention window is half
+  of it, and moving it moves the headline number a long way. The sensitivity
+  table lives with the measurements outside this repository.
+
+## Next: projects and attribution
+
+A config mapping paths, branches and domains to projects — twenty lines that
+should cover ninety per cent — and the accumulating thing one level below a
+project. The report is what says which domains are worth writing down: the
+unnamed row, and the browser keys under each project, are that list.
