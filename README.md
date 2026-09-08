@@ -71,8 +71,11 @@ and this tool does not.
 - **No URLs.** From your browsing history `spoor` keeps the host, the port,
   the *first* path segment, the page title and the time. Never the query
   string, never the fragment, never a second path segment — that is where
-  session tokens, password-reset links and search terms are. Page titles are
-  kept, and a search results page has your query in its title; see
+  session tokens, password-reset links and search terms usually live. Usually,
+  not always: on `forms.gle` or `meet.google.com` the first segment *is* the
+  identifier, and no rule about characters can tell one of those from a
+  project name. Page titles are kept too, and a search results page has your
+  query in its title. For both, the control is
   [Ignoring domains](#ignoring-domains).
 - **Read-only where your other programs are concerned.** `spoor` never writes
   to or deletes anything under `~/.claude/`, and it never opens a browser's
@@ -102,10 +105,11 @@ Vivaldi, a Firefox fork — reads the same two file formats and may well work
 if you point `spoor` at the file, but none of it has been tried and none of
 it is supported. If it does not work, that is expected rather than a bug.
 
-Built and used on Linux. CI cross-compiles for linux/amd64, linux/arm64,
-darwin/arm64 and windows/amd64, but macOS and Windows are unverified beyond
-the fact that they compile — including where the browser source looks for
-profiles there.
+Built and used on Ubuntu, with Chrome and Claude Code. That combination is the
+whole of what is verified. CI cross-compiles for linux/amd64, linux/arm64,
+darwin/arm64 and windows/amd64, but a build that succeeds is not a claim that
+anything works there: macOS and Windows have never been run, including where
+the browser source looks for profiles on them.
 
 ## Install
 
