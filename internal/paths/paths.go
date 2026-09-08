@@ -58,6 +58,22 @@ func DBPath() (string, error) {
 	return filepath.Join(dir, "spoor.db"), nil
 }
 
+// ConfigPath returns the YAML file spoor reads its settings from.
+//
+// Nothing writes this file: it does not have to exist, and when it does not,
+// every source runs on its defaults. SPOOR_CONFIG overrides it outright,
+// which is what the tests use so that no test reads the real one.
+func ConfigPath() (string, error) {
+	if p := os.Getenv("SPOOR_CONFIG"); p != "" {
+		return p, nil
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.yaml"), nil
+}
+
 // ClaudeProjectsDir returns the directory Claude Code writes session JSONL to.
 //
 // CLAUDE_CONFIG_DIR mirrors the variable Claude Code itself honours.

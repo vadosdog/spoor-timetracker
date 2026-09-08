@@ -47,6 +47,10 @@ type FileState struct {
 	// SeamHash identifies the content the offset was measured against: the
 	// bytes immediately before ReadOffset.
 	SeamHash string
+	// Cursor is the watermark of a source that reads a database rather than
+	// an appended log: the time of the newest record already imported from
+	// this file. Empty means "nothing imported yet".
+	Cursor string
 }
 
 // Open opens (creating if needed) the database at path and applies the schema.
@@ -101,6 +105,19 @@ func Open(path string) (*Store, error) {
 // new column fails — quietly, one warning per file, importing nothing.
 var addedColumns = []struct{ table, column, decl string }{
 	{"source_files", "seam_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"source_files", "cursor", "TEXT NOT NULL DEFAULT ''"},
+	{"events", "host", "TEXT NOT NULL DEFAULT ''"},
+	{"events", "port", "TEXT NOT NULL DEFAULT ''"},
+	{"events", "path_head", "TEXT NOT NULL DEFAULT ''"},
+	{"events", "title", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// addedIndexes are indexes that arrived after the table first shipped. Unlike
+// columns, CREATE INDEX IF NOT EXISTS is enough on its own — but only once the
+// column it names exists, so it runs after addedColumns rather than in
+// schema.sql.
+var addedIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS events_host ON events (host)`,
 }
 
 func migrate(db *sql.DB) error {
@@ -115,6 +132,11 @@ func migrate(db *sql.DB) error {
 		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.decl)
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	for _, stmt := range addedIndexes {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("create index: %w", err)
 		}
 	}
 	return nil
@@ -171,8 +193,9 @@ func (s *Store) InsertEvents(events []event.Event) (int, error) {
 		INSERT OR IGNORE INTO events (
 			source, external_id, ts, duration_ms, type, subtype,
 			project, raw_text, session_id, cwd, git_branch,
-			entrypoint, is_sidechain, client_version, ingested_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			entrypoint, is_sidechain, client_version,
+			host, port, path_head, title, ingested_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return 0, err
 	}
@@ -188,7 +211,8 @@ func (s *Store) InsertEvents(events []event.Event) (int, error) {
 		res, err := stmt.Exec(
 			e.Source, e.ExternalID, e.TS, duration, e.Type, e.Subtype,
 			e.Project, e.RawText, e.SessionID, e.CWD, e.GitBranch,
-			e.Entrypoint, e.IsSidechain, e.ClientVersion, ingestedAt,
+			e.Entrypoint, e.IsSidechain, e.ClientVersion,
+			e.Host, e.Port, e.PathHead, e.Title, ingestedAt,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("insert event %s: %w", e.ExternalID, err)
@@ -237,9 +261,9 @@ func (s *Store) FileState(source, path string) (FileState, bool, error) {
 		mtime string
 	)
 	err := s.db.QueryRow(
-		`SELECT size, mtime, read_offset, seam_hash FROM source_files WHERE source = ? AND path = ?`,
+		`SELECT size, mtime, read_offset, seam_hash, cursor FROM source_files WHERE source = ? AND path = ?`,
 		source, path,
-	).Scan(&st.Size, &mtime, &st.ReadOffset, &st.SeamHash)
+	).Scan(&st.Size, &mtime, &st.ReadOffset, &st.SeamHash, &st.Cursor)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return FileState{}, false, nil
@@ -259,16 +283,17 @@ func (s *Store) FileState(source, path string) (FileState, bool, error) {
 // SaveFileState records how far into path we have read.
 func (s *Store) SaveFileState(source, path string, st FileState) error {
 	_, err := s.db.Exec(`
-		INSERT INTO source_files (source, path, size, mtime, read_offset, seam_hash, seen_at)
-		VALUES (?,?,?,?,?,?,?)
+		INSERT INTO source_files (source, path, size, mtime, read_offset, seam_hash, cursor, seen_at)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT (source, path) DO UPDATE SET
 			size = excluded.size,
 			mtime = excluded.mtime,
 			read_offset = excluded.read_offset,
 			seam_hash = excluded.seam_hash,
+			cursor = excluded.cursor,
 			seen_at = excluded.seen_at`,
 		source, path, st.Size, st.MTime.UTC().Format(time.RFC3339Nano),
-		st.ReadOffset, st.SeamHash, s.now().UTC().Format(time.RFC3339),
+		st.ReadOffset, st.SeamHash, st.Cursor, s.now().UTC().Format(time.RFC3339),
 	)
 	return err
 }

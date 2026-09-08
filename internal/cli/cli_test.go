@@ -10,12 +10,15 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // week writes a synthetic session log covering seven local days, two events
@@ -59,6 +62,22 @@ func run(t *testing.T, args ...string) string {
 	return out.String()
 }
 
+// ingest runs an import that touches nothing real. Every source that looks
+// somewhere by default has to be pointed elsewhere or switched off here: a
+// test that quietly imports the machine's own browsing history would both
+// pass for the wrong reason and read data no test has any business reading.
+func ingest(t *testing.T, db, claudeDir string, extra ...string) string {
+	t.Helper()
+	args := append([]string{
+		"ingest",
+		"--db", db,
+		"--claude-dir", claudeDir,
+		"--config", filepath.Join(t.TempDir(), "no-config.yaml"),
+		"--no-browser",
+	}, extra...)
+	return run(t, args...)
+}
+
 // The acceptance criterion of this stage, end to end: two runs of ingest in a
 // row report the same number of events for a week.
 func TestIngestTwiceGivesTheSameWeek(t *testing.T) {
@@ -69,10 +88,10 @@ func TestIngestTwiceGivesTheSameWeek(t *testing.T) {
 	first := time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local)
 	week(t, src, first, 7)
 
-	run(t, "ingest", "--db", db, "--claude-dir", src, "--quiet")
+	ingest(t, db, src, "--quiet")
 	before := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-31")
 
-	run(t, "ingest", "--db", db, "--claude-dir", src, "--quiet")
+	ingest(t, db, src, "--quiet")
 	after := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-31")
 
 	if before != after {
@@ -92,14 +111,14 @@ func TestWeekSurvivesSourceFileDeletion(t *testing.T) {
 
 	path := week(t, src, time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local), 7)
 
-	run(t, "ingest", "--db", db, "--claude-dir", src, "--quiet")
+	ingest(t, db, src, "--quiet")
 	before := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-31")
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 
-	run(t, "ingest", "--db", db, "--claude-dir", src, "--quiet")
+	ingest(t, db, src, "--quiet")
 	after := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-31")
 
 	if before != after {
@@ -113,7 +132,7 @@ func TestCountRangeBounds(t *testing.T) {
 	db := filepath.Join(tmp, "spoor.db")
 
 	week(t, src, time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local), 7)
-	run(t, "ingest", "--db", db, "--claude-dir", src, "--quiet")
+	ingest(t, db, src, "--quiet")
 
 	// A single day is two events, and the last day of the range is included.
 	if got := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-25"); !strings.HasPrefix(got, "2 events") {
@@ -124,6 +143,188 @@ func TestCountRangeBounds(t *testing.T) {
 	}
 	if got := run(t, "count", "--db", db, "--from", "2026-09-01", "--to", "2026-09-07"); !strings.HasPrefix(got, "0 events") {
 		t.Errorf("empty week: %q", got)
+	}
+}
+
+// chromeHistory writes a history database in Chrome's shape. It is invented
+// from the published schema; no test reads a real profile.
+func chromeHistory(t *testing.T, dir string, visits ...[2]string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "History")
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`
+		CREATE TABLE urls (id INTEGER PRIMARY KEY AUTOINCREMENT, url LONGVARCHAR,
+			title LONGVARCHAR, last_visit_time INTEGER NOT NULL);
+		CREATE TABLE visits (id INTEGER PRIMARY KEY AUTOINCREMENT, url INTEGER NOT NULL,
+			visit_time INTEGER NOT NULL, transition INTEGER DEFAULT 0 NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	const chromeEpoch = 11644473600000000
+	for i, v := range visits {
+		when, err := time.ParseInLocation(time.RFC3339, v[0], time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		micros := when.UnixMicro() + chromeEpoch
+		if _, err := db.Exec(`INSERT INTO urls (id, url, title, last_visit_time) VALUES (?,?,?,?)`,
+			i+1, v[1], "page", micros); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO visits (url, visit_time) VALUES (?,?)`,
+			i+1, micros); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+// Two sources in one import, counted together and apart.
+func TestIngestReadsBothSources(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "projects")
+	db := filepath.Join(tmp, "spoor.db")
+
+	week(t, src, time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local), 7)
+	history := chromeHistory(t, filepath.Join(tmp, "Profile 1"),
+		[2]string{"2026-08-26T12:00:00+00:00", "https://example.com/a"},
+		[2]string{"2026-08-26T12:05:00+00:00", "https://example.com/b"},
+	)
+
+	out := run(t, "ingest", "--db", db, "--claude-dir", src,
+		"--config", filepath.Join(tmp, "no-config.yaml"), "--browser-history", history)
+	if !strings.Contains(out, "browser:") || !strings.Contains(out, "claude-code:") {
+		t.Errorf("ingest reported only one source:\n%s", out)
+	}
+
+	for _, c := range []struct{ source, want string }{
+		{"", "16 events"},
+		{"claude-code", "14 events"},
+		{"browser", "2 events"},
+	} {
+		got := run(t, "count", "--db", db, "--from", "2026-08-25", "--to", "2026-08-31", "--source", c.source)
+		if !strings.HasPrefix(got, c.want) {
+			t.Errorf("count --source %q: %q, want %s", c.source, got, c.want)
+		}
+	}
+}
+
+// The ignore list has to reach the source from the config file, and it has to
+// keep the domain out of the database rather than out of the display.
+func TestIgnoreListFromTheConfigFile(t *testing.T) {
+	tmp := t.TempDir()
+	db := filepath.Join(tmp, "spoor.db")
+	history := chromeHistory(t, filepath.Join(tmp, "Profile 1"),
+		[2]string{"2026-08-26T12:00:00+00:00", "https://videos.example/watch"},
+		[2]string{"2026-08-26T12:05:00+00:00", "https://work.example/board"},
+	)
+
+	cfg := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfg, []byte("browser:\n  ignore:\n    - videos.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, "ingest", "--db", db, "--claude-dir", filepath.Join(tmp, "no-projects"),
+		"--config", cfg, "--browser-history", history, "--quiet")
+
+	if got := run(t, "count", "--db", db, "--from", "2026-08-26", "--to", "2026-08-26"); !strings.HasPrefix(got, "1 events") {
+		t.Errorf("count = %q, want 1 event: the ignored domain reached the database", got)
+	}
+}
+
+// A history file the user named and spoor could not use is a warning about
+// that file, not a failed import — and not silence either. A typo in the
+// config means that browser is never imported, and nothing else would say so.
+func TestAHistoryFileTheUserNamedIsCheckedOutLoud(t *testing.T) {
+	tmp := t.TempDir()
+	out := ingest(t, filepath.Join(tmp, "spoor.db"), filepath.Join(tmp, "no-projects"))
+	if strings.Contains(out, "warning") {
+		t.Fatalf("a clean import warned:\n%s", out)
+	}
+
+	for _, c := range []struct{ path, want string }{
+		{filepath.Join(tmp, "Bookmarks"), "not a browser history file"},
+		{filepath.Join(tmp, "typo", "History"), "no such file"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{
+			"ingest",
+			"--db", filepath.Join(tmp, "spoor.db"),
+			"--claude-dir", filepath.Join(tmp, "no-projects"),
+			"--config", filepath.Join(tmp, "no-config.yaml"),
+			"--browser-history", c.path,
+			"--quiet",
+		}, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("%s: exit code = %d, want 0", c.path, code)
+		}
+		if !strings.Contains(stdout.String(), c.want) {
+			t.Errorf("%s: stdout = %q, want it to contain %q", c.path, stdout.String(), c.want)
+		}
+	}
+}
+
+// An ignore entry that could never match is an ignore list that silently does
+// nothing, which is the worst thing this config file could do.
+func TestUselessIgnoreEntryIsAWarning(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfg, []byte("browser:\n  ignore:\n    - '*.videos.example'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	history := chromeHistory(t, filepath.Join(tmp, "Profile 1"),
+		[2]string{"2026-08-26T12:00:00+00:00", "https://videos.example/watch"})
+
+	out := run(t, "ingest", "--db", filepath.Join(tmp, "spoor.db"),
+		"--claude-dir", filepath.Join(tmp, "no-projects"),
+		"--config", cfg, "--browser-history", history, "--quiet")
+	if !strings.Contains(out, "is not a domain name") {
+		t.Errorf("stdout = %q, want a warning about the entry", out)
+	}
+}
+
+// Hard limit 7: a source declares where it works and stays quietly out of the
+// way elsewhere. On a machine with neither source, "spoor ingest" must not
+// print two blocks of zeroes that read like a fault.
+func TestAnAbsentSourceSaysNothing(t *testing.T) {
+	tmp := t.TempDir()
+	out := run(t, "ingest",
+		"--db", filepath.Join(tmp, "spoor.db"),
+		"--claude-dir", filepath.Join(tmp, "no-projects"),
+		"--config", filepath.Join(tmp, "no-config.yaml"),
+		"--browser-history", filepath.Join(tmp, "nothing", "History"))
+
+	if strings.Contains(out, "claude-code:") {
+		t.Errorf("an absent Claude Code announced itself:\n%s", out)
+	}
+	if strings.Contains(out, "browser:") {
+		t.Errorf("an absent browser announced itself:\n%s", out)
+	}
+	if !strings.Contains(out, "database: 0 events total") {
+		t.Errorf("stdout = %q, want the database line", out)
+	}
+}
+
+// With two valid values, a silent "0 events" is a coin flip between "I have
+// none of that" and "I typed it wrong".
+func TestUnknownSourceIsRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"count", "--db", filepath.Join(t.TempDir(), "spoor.db"),
+		"--source", "clode-code"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no such source") {
+		t.Errorf("stderr = %q", stderr.String())
 	}
 }
 

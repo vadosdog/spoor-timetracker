@@ -265,9 +265,13 @@ func TestOpenHandlesAwkwardPaths(t *testing.T) {
 func TestOpenUpgradesAnOlderDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "spoor.db")
 
-	// A database in the shape that shipped before seam_hash existed.
+	// A database in the shape that shipped before any of these columns did.
 	st, err := Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// The indexes go first: SQLite will not drop a column an index names.
+	if _, err := st.DB().Exec(`DROP INDEX IF EXISTS events_host`); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range addedColumns {
@@ -291,7 +295,7 @@ func TestOpenUpgradesAnOlderDatabase(t *testing.T) {
 
 	// The queries that name the new columns must work, not warn.
 	if err := st.SaveFileState("claude-code", "/some/session.jsonl", FileState{
-		Size: 10, MTime: time.Now(), ReadOffset: 10, SeamHash: "abc",
+		Size: 10, MTime: time.Now(), ReadOffset: 10, SeamHash: "abc", Cursor: "2026-08-25T09:00:00.000000Z",
 	}); err != nil {
 		t.Fatalf("SaveFileState after upgrade: %v", err)
 	}
@@ -301,6 +305,26 @@ func TestOpenUpgradesAnOlderDatabase(t *testing.T) {
 	}
 	if got.SeamHash != "abc" {
 		t.Errorf("SeamHash = %q, want abc", got.SeamHash)
+	}
+	if got.Cursor != "2026-08-25T09:00:00.000000Z" {
+		t.Errorf("Cursor = %q, want the saved watermark", got.Cursor)
+	}
+
+	browsing := ev("chrome/Profile 1/2026-08-25T09:00:00.000000Z/1", "2026-08-25T09:00:00.000Z")
+	browsing.Source = "browser"
+	browsing.Host = "example.com"
+	browsing.Port = "3000"
+	browsing.PathHead = "orders"
+	browsing.Title = "Orders"
+	if _, err := st.InsertEvents([]event.Event{browsing}); err != nil {
+		t.Fatalf("InsertEvents after upgrade: %v", err)
+	}
+	var host string
+	if err := st.DB().QueryRow(`SELECT host FROM events WHERE source = 'browser'`).Scan(&host); err != nil {
+		t.Fatal(err)
+	}
+	if host != "example.com" {
+		t.Errorf("host = %q after upgrade, want example.com", host)
 	}
 }
 

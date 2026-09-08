@@ -10,12 +10,17 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/vadosdog/spoor-timetracker/internal/config"
 	"github.com/vadosdog/spoor-timetracker/internal/paths"
+	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
 	"github.com/vadosdog/spoor-timetracker/internal/store"
 )
@@ -29,6 +34,9 @@ Usage:
   spoor ingest [flags]   read sources and store what they show
   spoor count  [flags]   how many events the database holds for a date range
   spoor version          print the version
+
+Sources: claude-code (session logs), browser (Chrome history; Firefox
+untested — see README).
 
 Run "spoor <command> -h" for the flags of a command.
 spoor never uses the network.
@@ -57,6 +65,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// "spoor ingest -h" is somebody asking a question, not a failed run. The
+	// flag package has already printed the flags by the time it hands this
+	// back; printing an error after them and exiting non-zero would make the
+	// answer look like a fault.
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "spoor: %v\n", err)
 		return 1
@@ -68,18 +83,20 @@ func runIngest(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	dbPath := fs.String("db", "", "database file (default: XDG data dir)")
+	cfgPath := fs.String("config", "", "config file (default: XDG config dir)")
 	srcDir := fs.String("claude-dir", "", "Claude Code projects directory (default: ~/.claude/projects)")
+	noClaude := fs.Bool("no-claude-code", false, "skip the Claude Code source")
+	noBrowser := fs.Bool("no-browser", false, "skip the browser source")
+	var history repeatedPath
+	fs.Var(&history, "browser-history", "read this browser history database instead of the ones found automatically; repeatable")
 	quiet := fs.Bool("quiet", false, "print nothing unless something went wrong")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	root := *srcDir
-	if root == "" {
-		var err error
-		if root, err = paths.ClaudeProjectsDir(); err != nil {
-			return err
-		}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
 	}
 
 	st, closeDB, err := openStore(*dbPath)
@@ -88,30 +105,149 @@ func runIngest(args []string, stdout io.Writer) error {
 	}
 	defer closeDB()
 
-	rep, err := claudecode.Ingest(st, root)
-	if err != nil {
-		return err
+	var warnings []string
+	if !*noClaude {
+		rep, err := ingestClaudeCode(st, *srcDir, stdout, *quiet)
+		if err != nil {
+			return err
+		}
+		warnings = append(warnings, rep...)
+	}
+	if !*noBrowser {
+		rep, err := ingestBrowser(st, cfg, history, stdout, *quiet)
+		if err != nil {
+			return err
+		}
+		warnings = append(warnings, rep...)
 	}
 
 	total, err := st.TotalEvents()
 	if err != nil {
 		return err
 	}
-
 	if !*quiet {
-		fmt.Fprintf(stdout, "claude-code: %d files (%d read, %d unchanged), %d lines\n",
-			rep.FilesSeen, rep.FilesRead, rep.FilesSkipped, rep.LinesRead)
-		fmt.Fprintf(stdout, "events: %d found, %d new, %d session-state lines skipped\n",
-			rep.Events, rep.NewEvents, rep.SkippedState)
-		if rep.Malformed > 0 || rep.Oversized > 0 {
-			fmt.Fprintf(stdout, "dropped lines: %d malformed, %d over the size limit\n",
-				rep.Malformed, rep.Oversized)
-		}
 		fmt.Fprintf(stdout, "database: %d events total\n", total)
 	}
-	for _, e := range rep.Errors {
-		fmt.Fprintf(stdout, "warning: %s\n", e)
+	for _, w := range warnings {
+		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
+	return nil
+}
+
+func ingestClaudeCode(st *store.Store, root string, stdout io.Writer, quiet bool) ([]string, error) {
+	if root == "" {
+		var err error
+		if root, err = paths.ClaudeProjectsDir(); err != nil {
+			return nil, err
+		}
+	}
+
+	rep, err := claudecode.Ingest(st, root)
+	if err != nil {
+		return nil, err
+	}
+	// A source that found nothing to read says nothing: on a machine without
+	// Claude Code the tool is not broken, it is just doing the other half.
+	if rep.FilesSeen == 0 && len(rep.Errors) == 0 {
+		return nil, nil
+	}
+	if !quiet {
+		fmt.Fprintf(stdout, "claude-code: %d files (%d read, %d unchanged), %d lines\n",
+			rep.FilesSeen, rep.FilesRead, rep.FilesSkipped, rep.LinesRead)
+		fmt.Fprintf(stdout, "  events: %d found, %d new, %d session-state lines skipped\n",
+			rep.Events, rep.NewEvents, rep.SkippedState)
+		if rep.Malformed > 0 || rep.Oversized > 0 {
+			fmt.Fprintf(stdout, "  dropped lines: %d malformed, %d over the size limit\n",
+				rep.Malformed, rep.Oversized)
+		}
+	}
+	return rep.Errors, nil
+}
+
+// ingestBrowser runs the browser source. On a system the source does not
+// support it prints nothing and does nothing, which is the rule for every
+// source: declare where you work, and stay out of the way elsewhere.
+//
+// Naming history files on the command line replaces the search, the way
+// --claude-dir replaces the default projects directory. The same list in the
+// config file adds to it instead: that one describes the machine — a browser
+// installed somewhere unusual — rather than overriding it for one run.
+func ingestBrowser(st *store.Store, cfg config.Config, named []string, stdout io.Writer, quiet bool) ([]string, error) {
+	if !browser.Supported() {
+		return nil, nil
+	}
+
+	// Named here rather than "paths": that is the name of an imported package.
+	var profiles []browser.Profile
+	histories := named
+	if len(named) == 0 {
+		profiles = browser.Discover()
+		histories = cfg.Browser.History
+	}
+
+	// A path the user typed is held to a higher standard than one spoor found
+	// for itself: a discovered profile that is not there means the browser is
+	// not installed, but a configured one that is not there is a typo, and a
+	// typo in this list means that browser is never imported and nothing ever
+	// says so.
+	var warnings []string
+	for _, path := range histories {
+		p, ok := browser.ProfileAt(path)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: not a browser history file — expected one named %q or %q",
+				path, "History", "places.sqlite"))
+			continue
+		}
+		if _, err := os.Stat(p.Path); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v — not read", p.Path, err))
+			continue
+		}
+		profiles = append(profiles, p)
+	}
+
+	ignore, problems := browser.NewIgnore(cfg.Browser.Ignore)
+	for _, p := range problems {
+		warnings = append(warnings, fmt.Sprintf("ignore entry %q %s", p.Entry, p.Reason))
+	}
+
+	if len(profiles) == 0 {
+		return warnings, nil // no browser here: say nothing about it
+	}
+
+	rep, err := browser.Ingest(st, profiles, ignore)
+	if err != nil {
+		return nil, err
+	}
+	if !quiet {
+		fmt.Fprintf(stdout, "browser: %d profiles (%d read, %d unchanged), %d visits\n",
+			rep.Profiles, rep.ProfilesRead, rep.ProfilesSkipped, rep.Visits)
+		fmt.Fprintf(stdout, "  events: %d found, %d new, %d ignored, %d not http(s)\n",
+			rep.Events, rep.NewEvents, rep.Ignored, rep.NotWeb)
+		if rep.Unparseable > 0 {
+			fmt.Fprintf(stdout, "  dropped visits: %d with an unreadable address\n", rep.Unparseable)
+		}
+	}
+	return append(warnings, rep.Errors...), nil
+}
+
+func loadConfig(path string) (config.Config, error) {
+	if path == "" {
+		var err error
+		if path, err = paths.ConfigPath(); err != nil {
+			return config.Config{}, err
+		}
+	}
+	return config.Load(path)
+}
+
+// repeatedPath collects a flag that may be given more than once.
+type repeatedPath []string
+
+func (p *repeatedPath) String() string { return strings.Join(*p, ", ") }
+
+func (p *repeatedPath) Set(v string) error {
+	*p = append(*p, v)
 	return nil
 }
 
@@ -121,9 +257,18 @@ func runCount(args []string, stdout io.Writer) error {
 	dbPath := fs.String("db", "", "database file (default: XDG data dir)")
 	from := fs.String("from", "", "first local day, YYYY-MM-DD (default: 6 days before --to)")
 	to := fs.String("to", "", "last local day, inclusive, YYYY-MM-DD (default: today)")
-	source := fs.String("source", "", "restrict to one source, e.g. claude-code")
+	source := fs.String("source", "", "restrict to one source: claude-code or browser")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// With two valid values, a silent "0 events" is a coin flip between "I
+	// have none of that" and "I typed it wrong".
+	switch *source {
+	case "", claudecode.SourceName, browser.SourceName:
+	default:
+		return fmt.Errorf("--source: no such source %q; there are %s and %s",
+			*source, claudecode.SourceName, browser.SourceName)
 	}
 
 	last, err := parseDay(*to, time.Now())

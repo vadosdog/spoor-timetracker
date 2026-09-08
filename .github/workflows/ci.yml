@@ -32,8 +32,10 @@ jobs:
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
           golangci-lint run
 
-      # The acceptance tests of this stage live in here: two ingest runs give
-      # the same week, and an event outlives the JSONL it came from.
+      # The acceptance tests live in here: two ingest runs give the same week,
+      # an event outlives the file it came from, a browser history is read
+      # while it is locked and left untouched, and no query string ever
+      # reaches a column.
       - name: go test
         run: go test -race ./...
 
