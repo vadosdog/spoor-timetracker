@@ -131,3 +131,160 @@ func TestBadDurationIsAnError(t *testing.T) {
 		}
 	}
 }
+
+func TestAttributionSection(t *testing.T) {
+	cfg, err := Load(write(t, `
+attribution:
+  fallback: none
+  never:
+    - search.example.com
+  subjects:
+    - titles: '\b([A-Z]+-\d+)\b'
+  projects:
+    - name: widget
+      work: true
+      paths: ~/src/widget
+      keys: [widget.example.com, dev.example.com:3000/admin]
+      branches: '^widget/'
+      titles: 'Widget Service'
+      subjects:
+        - name: episode 14
+          branches: 'ep-14'
+`))
+	if err != nil {
+		t.Fatalf("attribution: %v", err)
+	}
+	a := cfg.Attribution
+	if a.Fallback != FallbackNone {
+		t.Errorf("Fallback = %q, want %q", a.Fallback, FallbackNone)
+	}
+	if !reflect.DeepEqual([]string(a.Never.Keys), []string{"search.example.com"}) {
+		t.Errorf("Never.Keys = %v", a.Never)
+	}
+	if len(a.Projects) != 1 {
+		t.Fatalf("got %d projects, want 1", len(a.Projects))
+	}
+	p := a.Projects[0]
+	if p.Work == nil || !*p.Work {
+		t.Errorf("Work = %v, want true", p.Work)
+	}
+	if !reflect.DeepEqual([]string(p.Keys), []string{"widget.example.com", "dev.example.com:3000/admin"}) {
+		t.Errorf("Keys = %v", p.Keys)
+	}
+	if len(p.Branches) != 1 || !p.Branches[0].MatchString("widget/thing") {
+		t.Errorf("Branches = %v", p.Branches)
+	}
+	if len(p.Subjects) != 1 || p.Subjects[0].Name != "episode 14" {
+		t.Errorf("Subjects = %+v", p.Subjects)
+	}
+	if len(a.Subjects) != 1 || a.Subjects[0].Titles[0].NumSubexp() != 1 {
+		t.Errorf("global subjects = %+v", a.Subjects)
+	}
+}
+
+// Most rules have exactly one path or one key, and the file is meant to be
+// twenty lines. Writing a list of one has to be optional.
+func TestAListMayBeWrittenAsOneValue(t *testing.T) {
+	cfg, err := Load(write(t, `
+attribution:
+  projects:
+    - name: widget
+      paths: /src/widget
+      titles: 'Widget'
+`))
+	if err != nil {
+		t.Fatalf("scalar list: %v", err)
+	}
+	p := cfg.Attribution.Projects[0]
+	if !reflect.DeepEqual([]string(p.Paths), []string{"/src/widget"}) {
+		t.Errorf("Paths = %v, want one entry", p.Paths)
+	}
+	if len(p.Titles) != 1 {
+		t.Errorf("Titles = %v, want one entry", p.Titles)
+	}
+}
+
+// A broken expression is a config error naming its line, not a rule that
+// silently matches nothing for the rest of the tool's life.
+func TestBrokenRegexpIsAnError(t *testing.T) {
+	_, err := Load(write(t, "attribution:\n  projects:\n    - name: x\n      titles: '([unclosed'\n"))
+	if err == nil {
+		t.Fatal("a broken regular expression was accepted")
+	}
+	if !strings.Contains(err.Error(), "line 4") {
+		t.Errorf("error does not name the line: %v", err)
+	}
+}
+
+// A misspelt fallback would otherwise mean the opposite of what somebody who
+// bothered to write the key wanted.
+func TestBadFallbackIsAnError(t *testing.T) {
+	_, err := Load(write(t, "attribution:\n  fallback: cwd_basename\n"))
+	if err == nil {
+		t.Fatal("an unknown fallback was accepted")
+	}
+	if !strings.Contains(err.Error(), "cwd-basename") {
+		t.Errorf("error does not say what is allowed: %v", err)
+	}
+}
+
+// The section was a bare list of keys before paths existed, and every config
+// written against that version still says so.
+func TestNeverAcceptsBothShapes(t *testing.T) {
+	flat, err := Load(write(t, "attribution:\n  never: [a.example.com, b.example.com]\n"))
+	if err != nil {
+		t.Fatalf("flat never: %v", err)
+	}
+	if !reflect.DeepEqual([]string(flat.Attribution.Never.Keys), []string{"a.example.com", "b.example.com"}) {
+		t.Errorf("a bare list is not read as keys: %+v", flat.Attribution.Never)
+	}
+	if len(flat.Attribution.Never.Paths) != 0 {
+		t.Errorf("a bare list produced paths: %v", flat.Attribution.Never.Paths)
+	}
+
+	both, err := Load(write(t, "attribution:\n  never:\n    keys: a.example.com\n    paths: [~/scratch, /tmp/x]\n"))
+	if err != nil {
+		t.Fatalf("never with both lists: %v", err)
+	}
+	if !reflect.DeepEqual([]string(both.Attribution.Never.Keys), []string{"a.example.com"}) {
+		t.Errorf("Keys = %v", both.Attribution.Never.Keys)
+	}
+	if !reflect.DeepEqual([]string(both.Attribution.Never.Paths), []string{"~/scratch", "/tmp/x"}) {
+		t.Errorf("Paths = %v", both.Attribution.Never.Paths)
+	}
+}
+
+// yaml.v3 does not carry KnownFields into a custom unmarshaler, so this file
+// checks its own keys by hand. A typo here would otherwise be a list that
+// silently does nothing — which is what the whole section exists to prevent.
+func TestUnknownKeyUnderNeverIsAnError(t *testing.T) {
+	_, err := Load(write(t, "attribution:\n  never:\n    keyz: [a.example.com]\n"))
+	if err == nil {
+		t.Fatal("a misspelt key under never was accepted")
+	}
+	if !strings.Contains(err.Error(), "keyz") || !strings.Contains(err.Error(), "line 3") {
+		t.Errorf("error does not name the key and its line: %v", err)
+	}
+}
+
+// A key with no value is an empty list, not a list of one empty string: the
+// latter reaches the rules and warns, every run, about an entry nobody wrote.
+// And a key given twice is an error here, because walking the mapping by hand
+// takes that check away from yaml.v3.
+func TestNeverRejectsWhatYamlWouldHaveCaught(t *testing.T) {
+	empty, err := Load(write(t, "attribution:\n  never:\n    keys:\n    paths:\n"))
+	if err != nil {
+		t.Fatalf("never with empty lists: %v", err)
+	}
+	if n := empty.Attribution.Never; len(n.Keys) != 0 || len(n.Paths) != 0 {
+		t.Errorf("an empty key produced entries: %+v", n)
+	}
+
+	_, err = Load(write(t, "attribution:\n  never:\n    keys: [a.example.com]\n    keys: [b.example.com]\n"))
+	if err == nil {
+		t.Fatal("a repeated key under never was accepted")
+	}
+	if !strings.Contains(err.Error(), "twice") {
+		t.Errorf("error does not say the key is repeated: %v", err)
+	}
+}

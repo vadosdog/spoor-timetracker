@@ -285,19 +285,84 @@ func TestNeitherRendererPrintsATitleOrALabel(t *testing.T) {
 		prompt("10:05:00", "widget"),
 	}
 
-	r := buildDayReport(events, Options{})
-	r.Timeline = true
-	var table bytes.Buffer
-	if err := RenderTable(&table, r); err != nil {
+	// The dictionary reads titles — that is how an issue key is found without
+	// an API — so the report now holds them in memory where it used not to.
+	// Every view is checked, including the two that exist because of the
+	// dictionary. What a rule may still put on screen is whatever its capture
+	// group matched, and that is the author's own expression: here it captures
+	// a key and not the query around it.
+	d := dict{
+		byCWD:   map[string]string{"/src/widget": "widget"},
+		subject: map[string]string{page.Title: "WID-1"},
+	}
+	r := buildDayReport(events, Options{Attribution: d})
+
+	views := map[string]Report{"day": r}
+	timeline := r
+	timeline.Timeline = true
+	views["timeline"] = timeline
+	subject := r
+	subject.Subject = "WID-1"
+	views["subject"] = subject
+	missing := r
+	missing.Subject = "no such subject"
+	views["subject not found"] = missing
+	unmatched := r
+	unmatched.ShowUnmatched = true
+	views["unmatched"] = unmatched
+
+	for view, rep := range views {
+		var table bytes.Buffer
+		if err := RenderTable(&table, rep); err != nil {
+			t.Fatal(err)
+		}
+		for name, out := range map[string]string{
+			"table": table.String(),
+			"json":  string(renderJSON(t, rep)),
+		} {
+			if strings.Contains(out, secret) {
+				t.Errorf("the %s renderer printed a page title or a tool label in the %s view:\n%s",
+					name, view, out)
+			}
+		}
+	}
+}
+
+// The subject view answers "how long has this taken". Asked about something
+// that is not a subject, it has to say so and say what is: zero hours and a
+// misspelling look identical otherwise.
+func TestTheSubjectViewSaysWhenThereIsNothing(t *testing.T) {
+	d := dict{
+		byCWD:   map[string]string{"/src/widget": "widget"},
+		subject: map[string]string{"[WID-42] the thing": "WID-42"},
+	}
+	events := []event.Event{
+		in(prompt("10:00:00", ""), "/src/widget"),
+		titled(visit("10:04:00", "tracker.test", "browse"), "[WID-42] the thing"),
+		in(prompt("10:08:00", ""), "/src/widget"),
+	}
+	r := buildDayReport(events, Options{Attribution: d})
+
+	found := r
+	found.Subject = "WID-42"
+	var out bytes.Buffer
+	if err := RenderTable(&out, found); err != nil {
 		t.Fatal(err)
 	}
-	for name, out := range map[string]string{
-		"table": table.String(),
-		"json":  string(renderJSON(t, r)),
-	} {
-		if strings.Contains(out, secret) {
-			t.Errorf("the %s renderer printed a page title or a tool label:\n%s", name, out)
+	for _, want := range []string{"WID-42", "widget", "by day"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the subject view does not mention %q:\n%s", want, out.String())
 		}
+	}
+
+	missing := r
+	missing.Subject = "WID-99"
+	out.Reset()
+	if err := RenderTable(&out, missing); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "nothing") || !strings.Contains(out.String(), "WID-42") {
+		t.Errorf("a subject with no time does not say so, or does not say what does have time:\n%s", out.String())
 	}
 }
 

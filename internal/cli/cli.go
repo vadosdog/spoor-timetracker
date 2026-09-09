@@ -21,6 +21,7 @@ import (
 	"github.com/vadosdog/spoor-timetracker/internal/config"
 	"github.com/vadosdog/spoor-timetracker/internal/paths"
 	"github.com/vadosdog/spoor-timetracker/internal/report"
+	"github.com/vadosdog/spoor-timetracker/internal/rules"
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
 	"github.com/vadosdog/spoor-timetracker/internal/store"
@@ -56,7 +57,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "ingest":
 		err = runIngest(args[1:], stdout)
 	case "report":
-		err = runReport(args[1:], stdout)
+		err = runReport(args[1:], stdout, stderr)
 	case "count":
 		err = runCount(args[1:], stdout)
 	case "version":
@@ -261,7 +262,7 @@ func (p *repeatedPath) Set(v string) error {
 // written, and running it a hundred times changes nothing. That is the point
 // of collecting and reporting being two commands — the rules here can be
 // argued with and re-run over the same events until they stop being wrong.
-func runReport(args []string, stdout io.Writer) error {
+func runReport(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	dbPath := fs.String("db", "", "database file (default: XDG data dir)")
@@ -272,6 +273,8 @@ func runReport(args []string, stdout io.Writer) error {
 	asJSON := fs.Bool("json", false, "print JSON instead of a table")
 	asTable := fs.Bool("table", false, "print a table (the default)")
 	timeline := fs.Bool("timeline", false, "list the day as a schedule: from when to when, on what")
+	subject := fs.String("subject", "", "answer about one accumulating thing instead of a range of days: all of its time, over the whole database unless --day or --week narrows it")
+	unmatched := fs.Bool("unmatched", false, "list the directories and browser keys no attribution rule mentions — the next lines of the config, busiest first; whole database unless --day or --week narrows it")
 	minRow := fs.Duration("min", report.DefaultMinRow, "fold projects smaller than this into one line; 0 gives every project a row")
 	gap := fs.Duration("gap", report.DefaultClusterGap, "largest pause that is still the same block of work")
 	window := fs.Duration("attention-window", 0, "half-width of the window a human touch casts (default: half the gap)")
@@ -311,6 +314,17 @@ func runReport(args []string, stdout io.Writer) error {
 	if *asJSON && *asTable {
 		return errors.New("--json and --table ask for different output; pick one")
 	}
+	// Both answer about the dictionary and neither is the day. Silently
+	// preferring one would make the other look broken.
+	if *subject != "" && *unmatched {
+		return errors.New("--subject and --unmatched ask different questions; pick one")
+	}
+	// And --timeline is the day read the other way round, so it has nothing to
+	// add to either. Refused rather than ignored, for the same reason: a flag
+	// that does nothing looks exactly like a flag that is broken.
+	if *timeline && (*subject != "" || *unmatched) {
+		return errors.New("--timeline is a way of reading the day; it does not apply to --subject or --unmatched")
+	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
@@ -348,6 +362,12 @@ func runReport(args []string, stdout io.Writer) error {
 		}
 	})
 
+	// The dictionary. A config with no attribution section compiles to a set of
+	// rules that names nothing, which leaves every event with the guess its
+	// source made — exactly what happened before there was a dictionary.
+	dictionary, problems := rules.New(cfg.Attribution)
+	opts.Attribution = dictionary
+
 	anchor := day.dateOr(week.dateOr(time.Now()))
 	from, to := midnight(anchor), addDays(midnight(anchor), 1)
 	if week.set {
@@ -360,14 +380,47 @@ func runReport(args []string, stdout io.Writer) error {
 	}
 	defer closeDB()
 
+	// "How long has this taken" has no date range of its own, and neither has
+	// "what is my dictionary missing", so both take the whole database —
+	// unless --day or --week was given as well, which narrows them to that
+	// range and answers a different, equally reasonable question.
+	if (*subject != "" || *unmatched) && !day.set && !week.set {
+		first, last, ok, err := st.Range()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// An empty database still has to produce a document rather than a
+			// sentence: today, holding nothing. The table says so in its own
+			// words further down, and --json stays parseable.
+			fmt.Fprintln(stderr, "no traces at all — has `spoor ingest` run?")
+		} else {
+			from, to = midnight(first.Local()), addDays(midnight(last.Local()), 1)
+		}
+	}
+
 	events, err := st.EventsBetween(from, to)
 	if err != nil {
 		return err
 	}
 
+	// To stderr, and that is not a detail: stdout here is a document. One
+	// unusable line in the config would otherwise put a warning at the top of
+	// `report --json` and make it something no reader can parse — including
+	// the reproducibility check the README asks people to run.
+	for _, p := range problems {
+		if p.Entry == "" {
+			fmt.Fprintf(stderr, "warning: attribution: %s\n", p.Reason)
+			continue
+		}
+		fmt.Fprintf(stderr, "warning: attribution: %q %s\n", p.Entry, p.Reason)
+	}
+
 	rep := report.Build(events, from, to, opts)
 	rep.Timeline = *timeline
 	rep.MinRow = *minRow
+	rep.Subject = *subject
+	rep.ShowUnmatched = *unmatched
 	if *asJSON {
 		return report.RenderJSON(stdout, rep)
 	}

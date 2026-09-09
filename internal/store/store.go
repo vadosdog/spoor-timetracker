@@ -249,11 +249,13 @@ func (s *Store) CountEvents(source string, from, to time.Time) (int, error) {
 
 // EventsBetween returns every event with from <= ts < to, oldest first.
 //
-// Every column but `title`. That one holds the page title, which on a search
+// Every column, `title` included, and that one was deliberately left out until
+// the attribution rules needed it. It holds the page title, which on a search
 // results page is the query somebody typed — the most revealing thing in the
-// database. Nothing downstream needs it, and a value that is never loaded
-// cannot be printed by accident; the day something does need it, this is the
-// line to change, deliberately.
+// database — and what reads it is the dictionary: an issue key lives in a path
+// segment spoor does not store and in the title, which it does. It is matched
+// against and never carried through: no renderer prints it, and a test asserts
+// that a title cannot reach either the table or the JSON.
 //
 // The order is total and does not depend on the order the rows were inserted
 // in: two databases holding the same events hand them back the same way, and
@@ -266,7 +268,7 @@ func (s *Store) EventsBetween(from, to time.Time) ([]event.Event, error) {
 		SELECT source, external_id, ts, duration_ms, type, subtype,
 		       project, raw_text, session_id, cwd, git_branch,
 		       entrypoint, is_sidechain, client_version,
-		       host, port, path_head
+		       host, port, path_head, title
 		FROM events
 		WHERE ts >= ? AND ts < ?
 		ORDER BY ts, source, external_id`,
@@ -286,7 +288,7 @@ func (s *Store) EventsBetween(from, to time.Time) ([]event.Event, error) {
 			&e.Source, &e.ExternalID, &e.TS, &duration, &e.Type, &e.Subtype,
 			&e.Project, &e.RawText, &e.SessionID, &e.CWD, &e.GitBranch,
 			&e.Entrypoint, &e.IsSidechain, &e.ClientVersion,
-			&e.Host, &e.Port, &e.PathHead,
+			&e.Host, &e.Port, &e.PathHead, &e.Title,
 		); err != nil {
 			return nil, err
 		}
@@ -297,6 +299,33 @@ func (s *Store) EventsBetween(from, to time.Time) ([]event.Event, error) {
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// Range is the first and the last event in the database, in UTC. The third
+// value is false when there are none at all.
+//
+// It exists for the question the accumulating subject asks — how long has this
+// one thing taken, over however long it has been going — which has no date
+// range of its own. Asking about "all of it" needs to know where all of it
+// starts, and a report that guessed would either miss the beginning or walk
+// through centuries of empty days.
+func (s *Store) Range() (first, last time.Time, ok bool, err error) {
+	var lo, hi sql.NullString
+	if err := s.db.QueryRow(`SELECT min(ts), max(ts) FROM events`).Scan(&lo, &hi); err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	if !lo.Valid || !hi.Valid {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	first, err = time.Parse(time.RFC3339, lo.String)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("unreadable first timestamp %q: %w", lo.String, err)
+	}
+	last, err = time.Parse(time.RFC3339, hi.String)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("unreadable last timestamp %q: %w", hi.String, err)
+	}
+	return first, last, true, nil
 }
 
 // TotalEvents counts everything in the database.

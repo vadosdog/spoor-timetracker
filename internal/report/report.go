@@ -26,6 +26,7 @@ package report
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vadosdog/spoor-timetracker/internal/event"
@@ -75,10 +76,34 @@ const (
 // against, roughly half the blocks of a day hold nothing but browsing.
 const Unnamed = ""
 
+// Attributor names an event: which project it belongs to, and which subject
+// inside that project. It is the dictionary from the config file, kept behind
+// an interface so that this package neither reads YAML nor knows what a rule
+// looks like — and so that a test can name events with three lines of Go.
+//
+// A nil Attributor leaves every event with the name its source guessed at
+// import time, which is what running without a config file means.
+type Attributor interface {
+	// Resolve returns the project and the subject of an event. Both may be
+	// empty: no project is a real answer, and the report has a row for it.
+	Resolve(e event.Event) (project, subject string)
+	// Work says whether a project was declared work rather than personal, and
+	// whether it said anything at all. Undeclared is not personal.
+	Work(project string) (work, declared bool)
+	// Covers says whether any rule has an opinion about this event — one that
+	// names it, or one that refuses to name it on purpose. What it does not
+	// cover is what the next line of the dictionary should be about, which is
+	// a question the tool can answer and its owner should not have to.
+	Covers(e event.Event) bool
+}
+
 // Options are the knobs. A zero threshold asks for its default; a zero Head or
 // Tail asks for nothing to be added, because "do not invent any time" has to be
 // expressible.
 type Options struct {
+	// Attribution is the dictionary. Nil means the rules of the sources alone.
+	Attribution Attributor
+
 	// ClusterGap is the largest pause that still counts as the same block of
 	// work.
 	ClusterGap time.Duration
@@ -151,6 +176,18 @@ type Report struct {
 	// should ever produce one; a report that silently dropped events would be
 	// worse than one that says how many.
 	Unreadable int
+	// Subject is set when the report answers about one accumulating thing
+	// rather than about a range of days. The days are still computed in full —
+	// blocks, owners and all — and only the reading of them changes, because a
+	// subject asked about on its own would otherwise be a handful of scattered
+	// events with hours of imaginary block between them.
+	Subject string
+	// ShowUnmatched asks for the list below instead of the day, and changes
+	// nothing that is measured.
+	ShowUnmatched bool
+	// Unmatched is every working directory and browser key in the range that
+	// no rule mentions, busiest first.
+	Unmatched []Unmatched
 }
 
 // Totals are the sums that both a day and a whole range carry.
@@ -211,6 +248,32 @@ type Day struct {
 	Totals
 	Clusters []Cluster
 	Runs     []Run
+	// Unmatched is what no rule mentions: the raw material for the next line
+	// of the dictionary. It changes nothing that is measured.
+	Unmatched []Unmatched
+}
+
+// Unmatched is one working directory or one browser key the dictionary says
+// nothing about, with how much of the day happened around it.
+//
+// It exists because a dictionary is not written once. New directories and new
+// hosts appear every week, and the question "which line should I add" has an
+// answer in the data: whatever is busiest and unmentioned. Answering it by
+// hand means reading the evidence column of the report and remembering which
+// keys already have rules, which is exactly the sort of bookkeeping a person
+// should not be doing.
+type Unmatched struct {
+	// Path is set for a working directory, Key for a browser key. Exactly one
+	// of them, which is what distinguishes the two lists.
+	Path string
+	Key  string
+	// Events is how many traces carry it, Time how much active time was spent
+	// with it on screen — the stretches that begin with one of those traces.
+	Events int
+	Time   time.Duration
+	// Project is what the report calls it as things stand: a name guessed from
+	// the directory, a name inherited from the block around it, or nothing.
+	Project string
 }
 
 // Project is one row of the report.
@@ -242,6 +305,35 @@ type Project struct {
 	// Candidates are the projects the neighbours of an unnamed block
 	// suggested and did not agree on. Both are shown; neither is chosen.
 	Candidates []string
+	// Subjects are the accumulating things inside this project: episode 14,
+	// level 3, one feature, one ticket. Their time is part of the project's,
+	// not extra to it, and it does not add up to the project's either — most
+	// of a project's time belongs to no subject in particular.
+	Subjects []Subject
+	// Work is what the dictionary declared this project to be. Nil means it
+	// did not say, which is not the same as personal.
+	Work *bool
+}
+
+// Subject is one accumulating thing inside a project, and the second and last
+// level of grouping there is.
+//
+// Its time is measured exactly like a project's: the stretch between two events
+// belongs to the subject of the nearest human touch. What it does not do is
+// inherit — a project can take its name from the block around it, a subject
+// never does. A ticket number seen in a page title says that page was about
+// that ticket; it says nothing whatsoever about the hour that followed.
+type Subject struct {
+	Name       string
+	Attention  time.Duration
+	Background time.Duration
+	// Events is how many events named this subject themselves. Unlike a
+	// project's count there is no inheritance behind it.
+	Events int
+	// Days is how many local days the subject has any time on. The number the
+	// accumulating question is asked with: three hours over eleven days is a
+	// different thing from three hours in one afternoon.
+	Days int
 }
 
 // SourceCount is how many of a project's events one source produced.
@@ -285,6 +377,9 @@ type entry struct {
 	e       event.Event
 	t       time.Time
 	project string
+	// subject is what the dictionary called this one event, and it stays that
+	// way: nothing below fills it in from a neighbour.
+	subject string
 	// own records that the event arrived carrying a project. Inheritance
 	// reads this rather than project, so the order blocks are visited in
 	// cannot change the answer.
@@ -311,7 +406,18 @@ func Build(events []event.Event, from, to time.Time, opts Options) Report {
 		if local.Before(from) || !local.Before(to) {
 			continue
 		}
-		entries = append(entries, entry{e: e, t: local, project: e.Project, own: e.Project != ""})
+		// The dictionary decides, and it decides here rather than at import
+		// time: an imported event is never re-parsed, so a rule applied there
+		// would reach only what was collected after it was written. Applied
+		// here it reaches the whole database, and a rule that turns out to be
+		// wrong costs one edit and one re-run.
+		project, subject := e.Project, ""
+		if opts.Attribution != nil {
+			project, subject = opts.Attribution.Resolve(e)
+		}
+		entries = append(entries, entry{
+			e: e, t: local, project: project, subject: subject, own: project != "",
+		})
 	}
 	// The store hands events back in a total order already. Sorting again is
 	// what makes Build independent of that promise, and it is a stable sort
@@ -334,6 +440,9 @@ func Build(events []event.Event, from, to time.Time, opts Options) Report {
 	}
 
 	rep.Total = aggregate(rep.Days)
+	for _, d := range rep.Days {
+		rep.Unmatched = mergeUnmatched(rep.Unmatched, d.Unmatched)
+	}
 	return rep
 }
 
@@ -354,7 +463,7 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 	blocks := splitBlocks(entries, opts.ClusterGap)
 	origins, candidates := attribute(entries, blocks)
 	windows := attentionWindows(entries, opts.AttentionWindow)
-	owners, ownerSessions := intervalOwners(entries, blocks)
+	owners, ownerSubjects, ownerSessions := intervalOwners(entries, blocks)
 	live := liveSessions(entries, opts.ClusterGap)
 
 	// The time between two adjacent events belongs to the project you last
@@ -364,7 +473,40 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 	// holding two projects to the larger of them.
 	type totals struct{ attention, background time.Duration }
 	byProject := map[string]*totals{}
+	// A subject belongs to a project, so it is keyed by both: two projects may
+	// each have a "release" and they are two different things.
+	type subjectKey struct{ project, subject string }
+	bySubject := map[subjectKey]*totals{}
 	agent := map[string]time.Duration{}
+
+	// What the dictionary says nothing about. Counted per event here and given
+	// its time in the stretch loop below, so that the busiest unmentioned
+	// directory and the busiest unmentioned host are the two lines worth
+	// writing next.
+	unmatched := map[string]*Unmatched{}
+	unmatchedOf := func(i int) *Unmatched {
+		if opts.Attribution == nil || opts.Attribution.Covers(entries[i].e) {
+			return nil
+		}
+		// Trailing separator trimmed, the way a rule trims it before matching:
+		// two spellings of one directory would otherwise be two lines of a
+		// list whose whole job is to be pasted into the config.
+		path, key := strings.TrimRight(entries[i].e.CWD, "/"), browserKey(entries[i].e)
+		if path == "" && key == "" {
+			return nil
+		}
+		u, ok := unmatched[path+"\x00"+key]
+		if !ok {
+			u = &Unmatched{Path: path, Key: key, Project: entries[i].project}
+			unmatched[path+"\x00"+key] = u
+		}
+		return u
+	}
+	for i := range entries {
+		if u := unmatchedOf(i); u != nil {
+			u.Events++
+		}
+	}
 	dayEnd := nextMidnight(date)
 	var prevTo time.Time
 	for bi, b := range blocks {
@@ -472,6 +614,13 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 			} else {
 				att = windows.overlap(from, to)
 			}
+			// The stretch is charged to whatever was on screen when it began,
+			// which is the event that opens it rather than the touch that owns
+			// it. A discovery list wants "how much of the day happened around
+			// this host", not "whose project it counted for".
+			if u := unmatchedOf(i); u != nil {
+				u.Time += span
+			}
 			owner := owners[i]
 			t, ok := byProject[owner]
 			if !ok {
@@ -482,6 +631,20 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 			t.background += span - att
 			c.Attention += att
 			c.Background += span - att
+
+			// The same stretch, filed under the accumulating thing it was
+			// part of. Time with no subject is simply not filed anywhere,
+			// which is why the subjects of a project do not add up to it.
+			if sub := ownerSubjects[i]; sub != "" {
+				k := subjectKey{owner, sub}
+				into, ok := bySubject[k]
+				if !ok {
+					into = &totals{}
+					bySubject[k] = into
+				}
+				into.attention += att
+				into.background += span - att
+			}
 
 			// Same owner as the stretch before, and touching it: one run.
 			if n := len(day.Runs); n > 0 && !day.Runs[n-1].Gap &&
@@ -531,11 +694,31 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		if t, ok := byProject[name]; ok {
 			p.Attention, p.Background = t.attention, t.background
 		}
+		if opts.Attribution != nil {
+			if work, declared := opts.Attribution.Work(name); declared {
+				p.Work = &work
+			}
+		}
 		fillEvidence(&p, entries)
 		p.Candidates = candidatesFor(name, blocks, entries, candidates)
+		// Every subject seen under this project gets a row, including one that
+		// holds no time: a single page about a ticket is a real trace of that
+		// ticket, and a row of zeros says so rather than losing it.
+		for _, s := range subjectsOf(entries, name) {
+			if t, ok := bySubject[subjectKey{name, s.Name}]; ok {
+				s.Attention, s.Background = t.attention, t.background
+			}
+			p.Subjects = append(p.Subjects, s)
+		}
 		day.Projects = append(day.Projects, p)
 	}
 	sortProjects(day.Projects)
+
+	// Ranged over a map, so it arrives in whatever order Go felt like.
+	for _, u := range unmatched {
+		day.Unmatched = append(day.Unmatched, *u)
+	}
+	sortUnmatched(day.Unmatched)
 
 	fillRuns(day.Runs, entries)
 
@@ -782,8 +965,13 @@ func attribute(entries []entry, blocks []block) (map[int]Origin, map[int][]strin
 // prompted, not on the thing left behind. A block with no human touch in it at
 // all falls back to the project of the event itself; there is nothing better
 // to go on.
-func intervalOwners(entries []entry, blocks []block) (owners, sessions []string) {
+// The subject of a stretch comes from the same touch as the project, for the
+// same reason: the minutes around a page about one ticket were spent on that
+// ticket. It is empty whenever that touch named no subject, and nothing fills
+// it in afterwards.
+func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions []string) {
 	owners = make([]string, len(entries))
+	subjects = make([]string, len(entries))
 	sessions = make([]string, len(entries))
 	for _, b := range blocks {
 		prev := make([]int, b.hi-b.lo)
@@ -804,10 +992,11 @@ func intervalOwners(entries []entry, blocks []block) (owners, sessions []string)
 		}
 		claim := func(i, touch int) {
 			if touch < 0 {
-				owners[i], sessions[i] = entries[i].project, ""
+				owners[i], subjects[i], sessions[i] = entries[i].project, entries[i].subject, ""
 				return
 			}
 			owners[i] = entries[touch].project
+			subjects[i] = entries[touch].subject
 			// The window the touch was in. Empty for a browser visit, which
 			// belongs to no chat: while you are reading a page, every session
 			// is one you are not in.
@@ -835,7 +1024,7 @@ func intervalOwners(entries []entry, blocks []block) (owners, sessions []string)
 			}
 		}
 	}
-	return owners, sessions
+	return owners, subjects, sessions
 }
 
 // liveRun is one window producing output for one project: when that session's
@@ -1048,6 +1237,223 @@ func sortSources(counts []SourceCount) {
 	})
 }
 
+// SubjectReport is the report read as one accumulating thing: how long it has
+// taken altogether, under which projects, and on which days.
+//
+// It is a reading of a report that was built normally, over whatever range it
+// covers. That matters: blocks, owners and attention are all decided by the
+// events around each other, so a report built from the subject's events alone
+// would stitch a fortnight of scattered pages into a handful of enormous
+// blocks. The days are computed in full and only then read one subject at a
+// time.
+type SubjectReport struct {
+	Name       string
+	Attention  time.Duration
+	Background time.Duration
+	Events     int
+	// First and Last are the first and last local day the subject appears on.
+	First, Last time.Time
+	// Projects is the subject's own time, split by the project it fell under.
+	// More than one is normal rather than an error: a ticket worked on in the
+	// browser and then in an editor is two.
+	Projects []Project
+	Days     []SubjectDay
+}
+
+// SubjectDay is one local day of a subject. Only days that hold something.
+type SubjectDay struct {
+	Date       time.Time
+	Attention  time.Duration
+	Background time.Duration
+	Events     int
+}
+
+// SubjectOf reads one subject out of a report. The name is matched without
+// regard to case, because a subject is something a person types on a command
+// line rather than an identifier.
+func (r Report) SubjectOf(name string) SubjectReport {
+	out := SubjectReport{Name: name}
+	byProject := map[string]int{}
+	for _, day := range r.Days {
+		var d SubjectDay
+		d.Date = day.Date
+		for _, p := range day.Projects {
+			for _, s := range p.Subjects {
+				if !strings.EqualFold(s.Name, name) {
+					continue
+				}
+				// The name is reported as the dictionary spells it, not as it
+				// was typed on the command line.
+				out.Name = s.Name
+				d.Attention += s.Attention
+				d.Background += s.Background
+				d.Events += s.Events
+				i, ok := byProject[p.Name]
+				if !ok {
+					i = len(out.Projects)
+					byProject[p.Name] = i
+					out.Projects = append(out.Projects, Project{Name: p.Name, Work: p.Work})
+				}
+				out.Projects[i].Attention += s.Attention
+				out.Projects[i].Background += s.Background
+				out.Projects[i].Events += s.Events
+			}
+		}
+		if d.Events == 0 && d.Attention == 0 && d.Background == 0 {
+			continue
+		}
+		if out.First.IsZero() {
+			out.First = day.Date
+		}
+		out.Last = day.Date
+		out.Attention += d.Attention
+		out.Background += d.Background
+		out.Events += d.Events
+		out.Days = append(out.Days, d)
+	}
+	sortProjects(out.Projects)
+	return out
+}
+
+// Subjects lists every subject in the report, busiest first. It is what the
+// command line prints when the subject asked about is not one of them: a
+// misspelling and a subject with no time look identical otherwise.
+//
+// A subject seen under two projects is one line here, and its Days is a count
+// of days rather than of project-days: merging within a day first, and only
+// then across days, is what keeps that true. Doing it the other way round
+// gives a subject touched under two projects on one afternoon two days.
+func (r Report) Subjects() []Subject {
+	var all []Subject
+	for _, day := range r.Days {
+		var perDay []Subject
+		for _, p := range day.Projects {
+			perDay = mergeSubjects(perDay, p.Subjects)
+		}
+		for i := range perDay {
+			perDay[i].Days = 1
+		}
+		all = mergeSubjects(all, perDay)
+	}
+	return all
+}
+
+// subjectsOf lists the subjects seen inside one project, with how many events
+// named each. Ordered by the count and then by name, so two runs agree.
+//
+// An event counts for the subject it named itself. That is not quite the same
+// question as "whose time is this" — the time between two events belongs to the
+// subject of the nearest touch, which may be a different event — and the two
+// are kept apart on purpose: one is what was recorded, the other is what was
+// concluded from it.
+func subjectsOf(entries []entry, project string) []Subject {
+	index := map[string]int{}
+	var out []Subject
+	for _, en := range entries {
+		if en.subject == "" || en.project != project {
+			continue
+		}
+		i, ok := index[en.subject]
+		if !ok {
+			i = len(out)
+			index[en.subject] = i
+			out = append(out, Subject{Name: en.subject, Days: 1})
+		}
+		out[i].Events++
+	}
+	sortSubjects(out)
+	return out
+}
+
+// sortUnmatched puts the busiest first: the line worth writing next is the one
+// that costs the most day. The order is total, so two runs cannot disagree.
+func sortUnmatched(list []Unmatched) {
+	sort.Slice(list, func(i, j int) bool {
+		a, b := list[i], list[j]
+		if a.Time != b.Time {
+			return a.Time > b.Time
+		}
+		if a.Events != b.Events {
+			return a.Events > b.Events
+		}
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		return a.Key < b.Key
+	})
+}
+
+// mergeUnmatched adds a day's unmentioned directories and keys to the running
+// list.
+func mergeUnmatched(into, from []Unmatched) []Unmatched {
+	index := map[string]int{}
+	for i, u := range into {
+		index[u.Path+"\x00"+u.Key] = i
+	}
+	for _, u := range from {
+		key := u.Path + "\x00" + u.Key
+		i, ok := index[key]
+		if !ok {
+			index[key] = len(into)
+			into = append(into, u)
+			continue
+		}
+		into[i].Events += u.Events
+		into[i].Time += u.Time
+		// The most recent name wins, because the column says what it is called
+		// *now*. Days arrive in order, so the last one to have a name for it is
+		// the latest — and over a whole database the first would be a name from
+		// a year ago. It is a hint either way, not a measurement: the same host
+		// is inherited by whichever project it fell next to that day.
+		if u.Project != "" {
+			into[i].Project = u.Project
+		}
+	}
+	sortUnmatched(into)
+	return into
+}
+
+func sortSubjects(subjects []Subject) {
+	sort.Slice(subjects, func(i, j int) bool {
+		a, b := subjects[i], subjects[j]
+		if a.Attention != b.Attention {
+			return a.Attention > b.Attention
+		}
+		if a.Background != b.Background {
+			return a.Background > b.Background
+		}
+		if a.Events != b.Events {
+			return a.Events > b.Events
+		}
+		return a.Name < b.Name
+	})
+}
+
+// mergeSubjects adds a day's subjects into a running total. Days are counted
+// rather than summed from anything: the accumulating question is how long a
+// thing has taken and over how many days, and the second half of that is a
+// count of days it appeared on.
+func mergeSubjects(into, from []Subject) []Subject {
+	index := map[string]int{}
+	for i, s := range into {
+		index[s.Name] = i
+	}
+	for _, s := range from {
+		i, ok := index[s.Name]
+		if !ok {
+			index[s.Name] = len(into)
+			into = append(into, s)
+			continue
+		}
+		into[i].Attention += s.Attention
+		into[i].Background += s.Background
+		into[i].Events += s.Events
+		into[i].Days += s.Days
+	}
+	sortSubjects(into)
+	return into
+}
+
 // distinctProjects lists every project present, in a stable order.
 func distinctProjects(entries []entry) []string {
 	seen := map[string]bool{}
@@ -1123,6 +1529,15 @@ func browserKey(e event.Event) string {
 		return ""
 	}
 	key := e.Host
+	// An address literal is the one host with colons of its own, and it is
+	// bracketed here for the same reason a URL brackets it: without them
+	// "::1:3000" cannot be read back, and this string is not only printed — it
+	// is what the config file is written from, and `report --unmatched` invites
+	// exactly that. A key nobody can paste back is a rule that silently matches
+	// nothing, which is the failure the whole dictionary is built to avoid.
+	if strings.Contains(key, ":") {
+		key = "[" + key + "]"
+	}
 	if e.Port != "" {
 		key += ":" + e.Port
 	}
@@ -1206,6 +1621,10 @@ func aggregate(days []Day) Totals {
 			t.Sources = mergeSources(t.Sources, p.Sources)
 			t.BrowserKeys = mergeKeys(t.BrowserKeys, p.BrowserKeys)
 			t.Candidates = distinct(append(t.Candidates, p.Candidates...))
+			t.Subjects = mergeSubjects(t.Subjects, p.Subjects)
+			if p.Work != nil {
+				t.Work = p.Work
+			}
 		}
 	}
 	sortProjects(total.Projects)

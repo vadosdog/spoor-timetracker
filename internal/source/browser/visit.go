@@ -170,6 +170,21 @@ func canonicalHost(host string) string {
 	return host
 }
 
+// CanonicalHost is canonicalHost for the attribution rules, which have the same
+// problem the ignore list has and for the same reason: an entry written in one
+// spelling and a stored host written in another would never meet, and nothing
+// would warn. The rule that producer and validator must share one call does not
+// stop at this package.
+func CanonicalHost(host string) string { return canonicalHost(host) }
+
+// IsAddress says whether a host is an address literal rather than a name. An
+// address has no subdomains, so a rule matching one must match it exactly:
+// walking labels would let an entry of "10" swallow 192.0.2.10.
+func IsAddress(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
 // pathHead returns the first path segment and nothing else. "/team/repo/-/
 // merge_requests/12" becomes "team".
 //

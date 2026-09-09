@@ -10,10 +10,16 @@ package report
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/vadosdog/spoor-timetracker/internal/config"
 	"github.com/vadosdog/spoor-timetracker/internal/event"
+	"github.com/vadosdog/spoor-timetracker/internal/rules"
+	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 )
 
 // Every fixture below is written by hand. Nothing here comes from a real
@@ -1009,5 +1015,356 @@ func TestEveryEventBelongsToExactlyOneLine(t *testing.T) {
 				t.Errorf("the schedule accounts for %d events of %d", inRuns, tc.want)
 			}
 		})
+	}
+}
+
+// dict is a hand-written dictionary, and the smallest thing that satisfies
+// Attributor. The real one is a package of its own; what is being tested here
+// is what the report does with an answer, not how the answer is arrived at.
+type dict struct {
+	byCWD   map[string]string // working directory -> project
+	byHost  map[string]string // browser host -> project
+	subject map[string]string // page title -> subject
+	work    map[string]bool
+	never   map[string]bool // hosts refused on purpose
+}
+
+func (d dict) Resolve(e event.Event) (string, string) {
+	subject := d.subject[e.Title]
+	if p, ok := d.byCWD[e.CWD]; ok {
+		return p, subject
+	}
+	if d.never[e.Host] {
+		return "", subject
+	}
+	if p, ok := d.byHost[e.Host]; ok {
+		return p, subject
+	}
+	// No rule: a Claude Code event keeps the guess its directory gave it.
+	return e.Project, subject
+}
+
+func (d dict) Work(project string) (bool, bool) {
+	w, ok := d.work[project]
+	return w, ok
+}
+
+func (d dict) Covers(e event.Event) bool {
+	if _, ok := d.byCWD[e.CWD]; ok && e.CWD != "" {
+		return true
+	}
+	if e.Host == "" {
+		return false
+	}
+	return d.never[e.Host] || d.byHost[e.Host] != ""
+}
+
+// in puts an event in a directory, the way the import leaves it: a project
+// guessed from the last element of the path.
+func in(e event.Event, cwd string) event.Event {
+	e.CWD = cwd
+	e.Project = cwd[strings.LastIndex(cwd, "/")+1:]
+	return e
+}
+
+// titled gives a browser visit a page title, which is the only field an issue
+// key can be read from: the segment it lives in is never stored.
+func titled(e event.Event, title string) event.Event {
+	e.Title = title
+	return e
+}
+
+// The guess made at import time is the last element of the working directory,
+// and it is wrong in both directions at once: it splits one project across the
+// directories inside it, and merges unrelated directories that end in the same
+// word. A rule on the directory above them is what fixes the first half.
+func TestTheDictionaryReplacesTheImportGuess(t *testing.T) {
+	events := []event.Event{
+		in(prompt("10:00:00", ""), "/src/widget"),
+		in(machine("10:02:00", ""), "/src/widget/api"),
+		in(prompt("10:04:00", ""), "/src/widget/ui"),
+	}
+	d := dict{byCWD: map[string]string{
+		"/src/widget":     "widget",
+		"/src/widget/api": "widget",
+		"/src/widget/ui":  "widget",
+	}}
+
+	before := buildDayReport(events, Options{})
+	if len(before.Total.Projects) != 3 {
+		t.Fatalf("without a dictionary: %v, want three rows", projectNames(before))
+	}
+	after := buildDayReport(events, Options{Attribution: d})
+	if names := projectNames(after); len(names) != 1 || names[0] != "widget" {
+		t.Fatalf("with a dictionary: %v, want one row named widget", names)
+	}
+	if before.Total.Active != after.Total.Active {
+		t.Errorf("the dictionary changed how much time there was: %s to %s",
+			before.Total.Active, after.Total.Active)
+	}
+}
+
+// A subject takes its time exactly as a project does: the stretch between two
+// events belongs to the subject of the nearest human touch. A page about one
+// ticket therefore owns the minutes around it, which is the only reason the
+// second level is worth having.
+func TestASubjectTakesTheTimeAroundIt(t *testing.T) {
+	d := dict{
+		byCWD:   map[string]string{"/src/widget": "widget"},
+		subject: map[string]string{"[WID-42] the thing": "WID-42"},
+	}
+	events := []event.Event{
+		in(prompt("10:00:00", ""), "/src/widget"),
+		titled(visit("10:04:00", "tracker.test", "browse"), "[WID-42] the thing"),
+		in(prompt("10:08:00", ""), "/src/widget"),
+	}
+	r := buildDayReport(events, Options{Attribution: d, Head: 0, Tail: 0})
+
+	p := projectOf(t, r, "widget")
+	if len(p.Subjects) != 1 || p.Subjects[0].Name != "WID-42" {
+		t.Fatalf("subjects = %+v, want one called WID-42", p.Subjects)
+	}
+	// The four minutes from the ticket page to the next prompt. Not the four
+	// before it: those belong to the prompt that opened them, which is the same
+	// rule projects are cut by — every stretch goes to the touch that starts
+	// it, and all three of these events are touches.
+	if got, want := p.Subjects[0].Attention, 4*time.Minute; got != want {
+		t.Errorf("subject attention = %s, want %s", got, want)
+	}
+	// And it is part of the project's time, not extra to it.
+	if p.Subjects[0].Attention > p.Attention {
+		t.Errorf("subject has %s of a project with %s", p.Subjects[0].Attention, p.Attention)
+	}
+}
+
+// A project can take its name from the block around it. A subject never does:
+// a ticket number in a page title says that page was about that ticket, and
+// says nothing whatsoever about the hour that followed.
+func TestSubjectsDoNotInherit(t *testing.T) {
+	d := dict{
+		byCWD:   map[string]string{"/src/widget": "widget"},
+		subject: map[string]string{"[WID-42] the thing": "WID-42"},
+	}
+	events := []event.Event{
+		titled(visit("09:00:00", "tracker.test", "browse"), "[WID-42] the thing"),
+		// A different block entirely, an hour later.
+		in(prompt("10:00:00", ""), "/src/widget"),
+		in(machine("10:05:00", ""), "/src/widget"),
+		in(prompt("10:09:00", ""), "/src/widget"),
+	}
+	r := buildDayReport(events, Options{Attribution: d})
+
+	p := projectOf(t, r, "widget")
+	var subject time.Duration
+	for _, s := range p.Subjects {
+		if s.Name == "WID-42" {
+			subject = s.Attention + s.Background
+		}
+	}
+	if subject > 5*time.Minute {
+		t.Errorf("the subject took %s of a block it was not in", subject)
+	}
+	if p.Attention == 0 {
+		t.Fatal("the project itself lost its time")
+	}
+}
+
+// The accumulating question is how long one thing has taken over however long
+// it has been going, so the answer is summed over days rather than shown per
+// day and left to the reader.
+func TestSubjectOfSumsOverDays(t *testing.T) {
+	d := dict{
+		byCWD:   map[string]string{"/src/widget": "widget"},
+		subject: map[string]string{"[WID-42] the thing": "WID-42"},
+	}
+	var events []event.Event
+	for _, offset := range []int{0, 1, 3} {
+		date := day(2026, 5, 4).AddDate(0, 0, offset)
+		for _, clock := range []string{"10:00:00", "10:05:00", "10:09:00"} {
+			e := titled(visit(clock, "tracker.test", "browse"), "[WID-42] the thing")
+			at := date.Add(hoursMinutes(clock))
+			e.TS = stamp(at)
+			events = append(events, e)
+		}
+	}
+	from := day(2026, 5, 4)
+	r := Build(events, from, from.AddDate(0, 0, 5), Options{Attribution: d})
+	r.Subject = "wid-42" // asked for in the case somebody typed
+
+	s := r.SubjectOf(r.Subject)
+	if s.Name != "WID-42" {
+		t.Errorf("Name = %q; the dictionary's spelling is what should come back", s.Name)
+	}
+	if len(s.Days) != 3 {
+		t.Fatalf("got %d days with time, want 3", len(s.Days))
+	}
+	if !s.First.Equal(from) || !s.Last.Equal(from.AddDate(0, 0, 3)) {
+		t.Errorf("first/last = %s/%s", s.First.Format(time.DateOnly), s.Last.Format(time.DateOnly))
+	}
+	var summed time.Duration
+	for _, dd := range s.Days {
+		summed += dd.Attention + dd.Background
+	}
+	if summed != s.Attention+s.Background {
+		t.Errorf("the days sum to %s and the total says %s", summed, s.Attention+s.Background)
+	}
+	if s.Events != 9 {
+		t.Errorf("events = %d, want 9", s.Events)
+	}
+}
+
+// hoursMinutes is the offset of a clock time into its day. The fixtures build
+// one day by parsing a clock; a subject spans several.
+func hoursMinutes(clock string) time.Duration {
+	t, err := time.ParseInLocation("15:04:05", clock, zone)
+	if err != nil {
+		panic(err)
+	}
+	return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute
+}
+
+// A dictionary is not written once, so the tool has to say what it does not
+// cover. A key refused on purpose is covered — a decision was made — and must
+// not come back in the list of things still to decide.
+func TestUnmatchedIsWhatNoRuleMentions(t *testing.T) {
+	d := dict{
+		byCWD:  map[string]string{"/src/widget": "widget"},
+		byHost: map[string]string{"tracker.test": "widget"},
+		never:  map[string]bool{"search.test": true},
+	}
+	events := []event.Event{
+		in(prompt("10:00:00", ""), "/src/widget"),
+		in(prompt("10:02:00", ""), "/src/scratch"),
+		visit("10:04:00", "tracker.test", "browse"),
+		visit("10:06:00", "search.test", "q"),
+		visit("10:08:00", "unknown.test", "page"),
+	}
+	r := buildDayReport(events, Options{Attribution: d})
+
+	got := map[string]bool{}
+	for _, u := range r.Unmatched {
+		got[u.Path+u.Key] = true
+	}
+	want := map[string]bool{"/src/scratch": true, "unknown.test/page": true}
+	if len(got) != len(want) {
+		t.Fatalf("unmatched = %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("unmatched does not mention %q: %v", k, got)
+		}
+	}
+	// And the name it has now is a guess, printed so that the difference
+	// between "unnamed" and "named by nothing in particular" is visible.
+	for _, u := range r.Unmatched {
+		if u.Path == "/src/scratch" && u.Project != "scratch" {
+			t.Errorf("called now = %q, want scratch", u.Project)
+		}
+	}
+}
+
+// Work is three-valued and the third value is not "personal". A tool that
+// assumed either way would be wrong about most of somebody's day: the
+// measurement that motivated the question found personal projects carrying
+// more than twice the hours of work ones.
+func TestWorkIsCarriedThroughAndMayBeUnsaid(t *testing.T) {
+	d := dict{
+		byCWD: map[string]string{"/src/paid": "paid", "/src/mine": "mine", "/src/unsaid": "unsaid"},
+		work:  map[string]bool{"paid": true, "mine": false},
+	}
+	events := []event.Event{
+		in(prompt("10:00:00", ""), "/src/paid"),
+		in(prompt("10:02:00", ""), "/src/mine"),
+		in(prompt("10:04:00", ""), "/src/unsaid"),
+	}
+	r := buildDayReport(events, Options{Attribution: d})
+	for _, c := range []struct {
+		project string
+		want    *bool
+	}{
+		{"paid", boolp(true)}, {"mine", boolp(false)}, {"unsaid", nil},
+	} {
+		got := projectOf(t, r, c.project).Work
+		switch {
+		case got == nil && c.want == nil:
+		case got == nil || c.want == nil:
+			t.Errorf("%s: Work = %v, want %v", c.project, got, c.want)
+		case *got != *c.want:
+			t.Errorf("%s: Work = %v, want %v", c.project, *got, *c.want)
+		}
+	}
+}
+
+func boolp(b bool) *bool { return &b }
+
+// The key the report prints is what the config is written from — `--unmatched`
+// says so in as many words — so it has to be readable back. An address is the
+// one host with colons of its own, and "::1:3000" is not a key anybody can
+// paste: it would compile into a rule that silently matches nothing, which is
+// the failure the dictionary exists to avoid.
+func TestAnAddressKeyIsPrintedSoItCanBePastedBack(t *testing.T) {
+	cases := []struct {
+		host, port, segment, want string
+	}{
+		{"::1", "3000", "app", "[::1]:3000/app"},
+		{"::1", "", "", "[::1]"},
+		{"192.0.2.10", "8080", "", "192.0.2.10:8080"},
+		{"example.com", "3000", "admin", "example.com:3000/admin"},
+	}
+	for _, c := range cases {
+		e := visit("10:00:00", c.host, c.segment)
+		e.Port = c.port
+		if got := browserKey(e); got != c.want {
+			t.Errorf("browserKey(%s:%s/%s) = %q, want %q", c.host, c.port, c.segment, got, c.want)
+		}
+	}
+}
+
+// The invariant the whole maintenance loop rests on, tested end to end because
+// its two halves live in two packages and both of them have broken: a key the
+// report prints, pasted into the config, has to name the event it came from.
+//
+// It is the one thing `report --unmatched` promises in as many words — "paste
+// one into keys:" — and neither half can check it alone. The printing side has
+// been wrong (an address without brackets) and the parsing side has been wrong
+// (a port split off the middle of an address), and each time the other side's
+// tests passed.
+func TestAPrintedKeyNamesTheEventItCameFrom(t *testing.T) {
+	hosts := []struct{ host, port, segment string }{
+		{"example.com", "", ""},
+		{"dev.example.com", "3000", "admin"},
+		{"192.0.2.10", "8080", "app"},
+		{"::1", "3000", "app"},
+		{"::1", "", ""},
+		{"0:0:0:0:0:0:0:1", "5173", ""},
+	}
+	for _, h := range hosts {
+		e := visit("10:00:00", h.host, h.segment)
+		// Canonical on the way in, exactly as the browser source stores it.
+		e.Host = browser.CanonicalHost(h.host)
+		e.Port = h.port
+		printed := browserKey(e)
+		if printed == "" {
+			t.Fatalf("%v produced no key at all", h)
+		}
+		// Quoted, because a key beginning with a bracket is a list in YAML —
+		// which is what the README tells the reader to do.
+		var cfg struct {
+			Attribution config.Attribution `yaml:"attribution"`
+		}
+		doc := "attribution:\n  projects:\n    - name: pasted\n      keys: ['" + printed + "']\n"
+		if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
+			t.Fatalf("%s: %v", doc, err)
+		}
+		r, problems := rules.New(cfg.Attribution)
+		for _, p := range problems {
+			t.Errorf("pasting %q gave a problem: %q %s", printed, p.Entry, p.Reason)
+		}
+		if got, _ := r.Resolve(e); got != "pasted" {
+			t.Errorf("the key %q printed for %v named %q when pasted back", printed, h, got)
+		}
+		if !r.Covers(e) {
+			t.Errorf("the key %q printed for %v is still uncovered when pasted back", printed, h)
+		}
 	}
 }

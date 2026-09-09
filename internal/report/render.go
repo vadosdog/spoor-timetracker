@@ -49,6 +49,16 @@ const backgroundLabel = "agent worked in the background"
 // RenderTable writes the report as a table for a terminal.
 func RenderTable(w io.Writer, r Report) error {
 	b := &strings.Builder{}
+	if r.ShowUnmatched {
+		writeUnmatched(b, r)
+		_, err := io.WriteString(w, b.String())
+		return err
+	}
+	if r.Subject != "" {
+		writeSubjectReport(b, r)
+		_, err := io.WriteString(w, b.String())
+		return err
+	}
 	fmt.Fprintln(b, heading(r))
 	fmt.Fprintln(b)
 
@@ -61,6 +71,10 @@ func RenderTable(w io.Writer, r Report) error {
 	writeProjects(b, r.Total.Projects, r.MinRow)
 	fmt.Fprintln(b)
 	writeSummary(b, r)
+	if subjects := r.Subjects(); len(subjects) > 0 {
+		fmt.Fprintln(b)
+		writeSubjects(b, r.Total.Projects)
+	}
 
 	switch {
 	case r.Timeline:
@@ -262,6 +276,215 @@ func writeSummary(b *strings.Builder, r Report) {
 	_ = tw.Flush()
 }
 
+// subjectsInTable is how many subjects the summary lists before it starts
+// counting them instead. A dictionary with one line for issue keys produces a
+// subject per ticket, and a week of them is a page of rows nobody reads.
+const subjectsInTable = 8
+
+// writeSubjects lists the accumulating things the range touched: the second
+// level of grouping, and the last one there is.
+//
+// It is not a breakdown of the table above it and does not add up to it. Most
+// of a project's time belongs to no subject in particular, and saying so
+// plainly is better than printing a "rest" row that would look like a project.
+func writeSubjects(b *strings.Builder, projects []Project) {
+	type row struct {
+		project string
+		Subject
+	}
+	var rows []row
+	for _, p := range projects {
+		for _, s := range p.Subjects {
+			rows = append(rows, row{p.Name, s})
+		}
+	}
+	// Projects arrive busiest first and subjects likewise inside each, so the
+	// order is already total; a straight sort by time here would mix projects
+	// together, which is not what a second level of grouping means.
+	fmt.Fprintln(b, "subjects — inside the projects above, not extra to them")
+	tw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	shown := 0
+	for _, r := range rows {
+		if shown == subjectsInTable {
+			fmt.Fprintf(tw, "  %d more\t\t\t%s\n", len(rows)-shown, "see --json, or ask about one with --subject")
+			break
+		}
+		shown++
+		name := r.project
+		if name == Unnamed {
+			name = unnamedLabel
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", r.Name, hm(r.Attention), hm(r.Background), name)
+	}
+	_ = tw.Flush()
+}
+
+// writeSubjectReport is the whole report read as one accumulating thing: how
+// long it has taken, under which projects, and on which days.
+func writeSubjectReport(b *strings.Builder, r Report) {
+	s := r.SubjectOf(r.Subject)
+	if len(s.Days) == 0 {
+		fmt.Fprintf(b, "subject %q — nothing in %s\n", r.Subject, rangeOf(r))
+		if all := r.Subjects(); len(all) > 0 {
+			fmt.Fprintln(b, "\nsubjects that do have time in it:")
+			tw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+			for i, other := range all {
+				if i == subjectsInTable {
+					fmt.Fprintf(tw, "  and %d more\tsee --json\n", len(all)-i)
+					break
+				}
+				fmt.Fprintf(tw, "  %s\t%s\n", other.Name, hm(other.Attention))
+			}
+			_ = tw.Flush()
+		} else {
+			fmt.Fprintln(b, "\nNo subject has any. Subjects come from the attribution rules "+
+				"in the config file; without them the report has projects and nothing below.")
+		}
+		return
+	}
+
+	// The range it was looked for in is worth saying only when it is wider
+	// than the subject itself: "out of" repeating the same dates back at the
+	// reader says nothing.
+	span := s.First.Format(time.DateOnly)
+	if !s.Last.Equal(s.First) {
+		span += " to " + s.Last.Format(time.DateOnly)
+	}
+	if looked := rangeOf(r); looked != span {
+		span += fmt.Sprintf(", out of %s", looked)
+	}
+	fmt.Fprintf(b, "subject %q — %s, %s with traces\n\n", s.Name, span, days(len(s.Days)))
+
+	tw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "PROJECT\tATTENTION\tBACKGROUND\tEVENTS")
+	for _, p := range s.Projects {
+		name := p.Name
+		if name == Unnamed {
+			name = unnamedLabel
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", name, hm(p.Attention), hm(p.Background), p.Events)
+	}
+	_ = tw.Flush()
+
+	fmt.Fprintln(b)
+	tw = tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	// The same two lines as the day summary, and the same flag decides them.
+	// Hard-coding "not counted" here was wrong in the one way documentation
+	// cannot survive: it told the reader to pass a flag they had just passed.
+	if r.Options.CountBackground {
+		fmt.Fprintf(tw, "counted\t%s\t%s\n", hm(s.Attention+s.Background),
+			"attention plus the background below")
+	}
+	fmt.Fprintf(tw, "attention\t%s\t%s\n", hm(s.Attention),
+		"the column above, summed over every day this subject appears on")
+	fmt.Fprintf(tw, "%s\t%s\t%s\n", backgroundLabel, hm(s.Background), backgroundNote(r.Options))
+	fmt.Fprintf(tw, "events\t%d\t%s\n", s.Events, "traces that named this subject themselves")
+	_ = tw.Flush()
+
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "by day")
+	tw = tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	for _, d := range s.Days {
+		fmt.Fprintf(tw, "  %s %s\tattention %s\tbackground %s\t%s\n",
+			d.Date.Format("Mon"), d.Date.Format(time.DateOnly),
+			hm(d.Attention), hm(d.Background), events(d.Events))
+	}
+	_ = tw.Flush()
+}
+
+// unmatchedInTable is how many lines of each list are printed. A long tail of
+// hosts visited once is not the next line of anybody's dictionary.
+const unmatchedInTable = 15
+
+// writeUnmatched lists what no rule mentions: the next lines of the dictionary,
+// busiest first, in the form they are written in.
+//
+// This is the maintenance loop of the whole stage. A dictionary is not written
+// once — directories and hosts appear every week — and without this the way to
+// find them is to read the evidence column and remember which keys already
+// have rules.
+func writeUnmatched(b *strings.Builder, r Report) {
+	var paths, keys []Unmatched
+	for _, u := range r.Unmatched {
+		if u.Path != "" {
+			paths = append(paths, u)
+			continue
+		}
+		keys = append(keys, u)
+	}
+
+	fmt.Fprintf(b, "no rule mentions these, %s\n", rangeOf(r))
+	if len(paths)+len(keys) == 0 {
+		// "Everything is covered" and "there is nothing here" are the same
+		// empty list and opposite answers. A database nobody has imported into
+		// would otherwise read as a dictionary with no work left in it.
+		if r.Total.Projects == nil && r.Total.Active == 0 {
+			fmt.Fprintln(b, "\nNo traces in this range. Has `spoor ingest` run?")
+			return
+		}
+		fmt.Fprintln(b, "\nEverything in this range is covered by a rule or refused by one on purpose.")
+		return
+	}
+
+	section := func(heading, column string, list []Unmatched, write func(*tabwriter.Writer, Unmatched)) {
+		if len(list) == 0 {
+			return
+		}
+		fmt.Fprintf(b, "\n%s\n", heading)
+		tw := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(tw, "%s\tTIME\tEVENTS\tCALLED NOW\n", column)
+		for i, u := range list {
+			if i == unmatchedInTable {
+				fmt.Fprintf(tw, "%d more\t\t\t%s\n", len(list)-i, "see --json")
+				break
+			}
+			write(tw, u)
+		}
+		_ = tw.Flush()
+	}
+	called := func(u Unmatched) string {
+		if u.Project == Unnamed {
+			return unnamedLabel
+		}
+		return u.Project
+	}
+	section("working directories — a rule on the directory above them makes them one project",
+		"DIRECTORY", paths, func(tw *tabwriter.Writer, u Unmatched) {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Path, hm(u.Time), u.Events, called(u))
+		})
+	section("browser keys — paste one into keys:, or into never: if it serves every project at once",
+		"KEY", keys, func(tw *tabwriter.Writer, u Unmatched) {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Key, hm(u.Time), u.Events, called(u))
+		})
+
+	fmt.Fprintln(b, "\nA name in the last column is a guess, not a rule: for a directory it is the "+
+		"last element of the path, which splits one project across the directories inside it and "+
+		"merges unrelated ones that end in the same word; for a browser key it is whatever the "+
+		"block around it was called.")
+}
+
+// days and events are counts with their nouns. "1 days with traces" is the
+// sort of thing that makes a reader wonder what else was not looked at.
+func days(n int) string { return count(n, "day", "days") }
+
+func events(n int) string { return count(n, "event", "events") }
+
+func count(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// rangeOf names the range a subject was looked for in, so that "nothing" can
+// be told from "nothing this week".
+func rangeOf(r Report) string {
+	if len(r.Days) == 1 {
+		return r.From.Format(time.DateOnly)
+	}
+	return fmt.Sprintf("%s to %s", r.From.Format(time.DateOnly), r.To.AddDate(0, 0, -1).Format(time.DateOnly))
+}
+
 func backgroundNote(o Options) string {
 	if o.CountBackground {
 		return "counted, because --count-background was given"
@@ -383,6 +606,19 @@ func hm(d time.Duration) string {
 // clock, on the machine or on the order rows came back from SQLite. There is a
 // test that runs the same events through twice and compares the bytes.
 func RenderJSON(w io.Writer, r Report) error {
+	if r.ShowUnmatched {
+		return writeJSON(w, jsonUnmatchedReport{
+			Range: jsonRange{
+				From: r.From.Format(time.DateOnly),
+				To:   r.To.AddDate(0, 0, -1).Format(time.DateOnly),
+				Days: len(r.Days),
+			},
+			Unmatched: jsonUnmatched(r.Unmatched),
+		})
+	}
+	if r.Subject != "" {
+		return writeJSON(w, jsonSubjectReportOf(r))
+	}
 	out := jsonReport{
 		Range: jsonRange{
 			From: r.From.Format(time.DateOnly),
@@ -445,10 +681,148 @@ func RenderJSON(w io.Writer, r Report) error {
 		out.Days = append(out.Days, day)
 	}
 
+	return writeJSON(w, out)
+}
+
+func writeJSON(w io.Writer, doc any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
-	return enc.Encode(out)
+	return enc.Encode(doc)
+}
+
+// jsonSubjectReportOf is what --subject answers with. A document of its own
+// rather than the day report with a filter applied to it: the question is
+// "how long has this taken", and answering it with a structure organised by day
+// would leave the reader to add the days up.
+func jsonSubjectReportOf(r Report) jsonSubjectReport {
+	s := r.SubjectOf(r.Subject)
+	out := jsonSubjectReport{
+		Subject: r.Subject,
+		Range: jsonRange{
+			From: r.From.Format(time.DateOnly),
+			To:   r.To.AddDate(0, 0, -1).Format(time.DateOnly),
+			Days: len(r.Days),
+		},
+		Found:        len(s.Days) > 0,
+		Attention:    hm(s.Attention),
+		AttentionMS:  ms(s.Attention),
+		Background:   hm(s.Background),
+		BackgroundMS: ms(s.Background),
+		Events:       s.Events,
+		DaysWithTime: len(s.Days),
+		Projects:     []jsonProject{},
+		Days:         []jsonSubjectDay{},
+	}
+	// The same line the table prints under --count-background. --json is the
+	// same report in another format, so a flag that changes one has to change
+	// the other.
+	counted := s.Attention
+	if r.Options.CountBackground {
+		counted += s.Background
+	}
+	out.Counted, out.CountedMS = hm(counted), ms(counted)
+	if len(s.Days) > 0 {
+		out.Subject = s.Name
+		out.First = s.First.Format(time.DateOnly)
+		out.Last = s.Last.Format(time.DateOnly)
+	}
+	for _, p := range s.Projects {
+		out.Projects = append(out.Projects, jsonProject{
+			Project:      p.Name,
+			Work:         p.Work,
+			Attention:    hm(p.Attention),
+			AttentionMS:  ms(p.Attention),
+			Background:   hm(p.Background),
+			BackgroundMS: ms(p.Background),
+			Agent:        hm(0),
+			Wall:         hm(0),
+			Events:       p.Events,
+			Sources:      []jsonSource{},
+			BrowserKeys:  []jsonKey{},
+			Candidates:   []string{},
+			Subjects:     []jsonSubject{},
+		})
+	}
+	for _, d := range s.Days {
+		out.Days = append(out.Days, jsonSubjectDay{
+			Date:         d.Date.Format(time.DateOnly),
+			Attention:    hm(d.Attention),
+			AttentionMS:  ms(d.Attention),
+			Background:   hm(d.Background),
+			BackgroundMS: ms(d.Background),
+			Events:       d.Events,
+		})
+	}
+	// What else there is to ask about, so that a misspelling and a subject
+	// with no time can be told apart by a program as well as by a person.
+	out.Known = []string{}
+	for _, other := range r.Subjects() {
+		out.Known = append(out.Known, other.Name)
+	}
+	return out
+}
+
+type jsonSubjectReport struct {
+	Subject string    `json:"subject"`
+	Range   jsonRange `json:"range"`
+	// Found is false when nothing in the range carries this subject. The
+	// numbers below are then zero, which on its own would read as "no time
+	// spent" rather than "no such subject".
+	Found        bool             `json:"found"`
+	First        string           `json:"first_day,omitempty"`
+	Last         string           `json:"last_day,omitempty"`
+	DaysWithTime int              `json:"days_with_time"`
+	Attention    string           `json:"attention"`
+	AttentionMS  int64            `json:"attention_ms"`
+	Background   string           `json:"background"`
+	BackgroundMS int64            `json:"background_ms"`
+	Counted      string           `json:"counted"`
+	CountedMS    int64            `json:"counted_ms"`
+	Events       int              `json:"events"`
+	Projects     []jsonProject    `json:"projects"`
+	Days         []jsonSubjectDay `json:"days"`
+	Known        []string         `json:"known_subjects"`
+}
+
+// jsonUnmatchedReport is what --unmatched answers with: the lines the
+// dictionary is missing, and nothing about the day.
+type jsonUnmatchedReport struct {
+	Range     jsonRange           `json:"range"`
+	Unmatched []jsonUnmatchedItem `json:"unmatched"`
+}
+
+type jsonUnmatchedItem struct {
+	// Exactly one of path and key is set; the other is empty.
+	Path   string `json:"path"`
+	Key    string `json:"key"`
+	Time   string `json:"time"`
+	TimeMS int64  `json:"time_ms"`
+	Events int    `json:"events"`
+	// Called is what the report calls it as things stand — a guess from the
+	// directory name, or a name inherited from the block around it.
+	Called string `json:"called_now"`
+}
+
+func jsonUnmatched(list []Unmatched) []jsonUnmatchedItem {
+	out := []jsonUnmatchedItem{}
+	for _, u := range list {
+		out = append(out, jsonUnmatchedItem{
+			Path: u.Path, Key: u.Key,
+			Time: hm(u.Time), TimeMS: ms(u.Time),
+			Events: u.Events, Called: u.Project,
+		})
+	}
+	return out
+}
+
+type jsonSubjectDay struct {
+	Date         string `json:"date"`
+	Attention    string `json:"attention"`
+	AttentionMS  int64  `json:"attention_ms"`
+	Background   string `json:"background"`
+	BackgroundMS int64  `json:"background_ms"`
+	Events       int    `json:"events"`
 }
 
 type jsonReport struct {
@@ -518,19 +892,36 @@ type jsonRun struct {
 }
 
 type jsonProject struct {
-	Project      string       `json:"project"`
-	Attention    string       `json:"attention"`
-	AttentionMS  int64        `json:"attention_ms"`
-	Background   string       `json:"background"`
-	BackgroundMS int64        `json:"background_ms"`
-	Agent        string       `json:"agent"`
-	AgentMS      int64        `json:"agent_ms"`
-	Wall         string       `json:"wall"`
-	WallMS       int64        `json:"wall_ms"`
-	Events       int          `json:"events"`
-	Sources      []jsonSource `json:"sources"`
-	BrowserKeys  []jsonKey    `json:"browser_keys"`
-	Candidates   []string     `json:"neighbour_candidates"`
+	Project string `json:"project"`
+	// Work is null when the dictionary did not say, which is not the same as
+	// false. Three values on purpose.
+	Work         *bool         `json:"work"`
+	Attention    string        `json:"attention"`
+	AttentionMS  int64         `json:"attention_ms"`
+	Background   string        `json:"background"`
+	BackgroundMS int64         `json:"background_ms"`
+	Agent        string        `json:"agent"`
+	AgentMS      int64         `json:"agent_ms"`
+	Wall         string        `json:"wall"`
+	WallMS       int64         `json:"wall_ms"`
+	Events       int           `json:"events"`
+	Sources      []jsonSource  `json:"sources"`
+	BrowserKeys  []jsonKey     `json:"browser_keys"`
+	Candidates   []string      `json:"neighbour_candidates"`
+	Subjects     []jsonSubject `json:"subjects"`
+}
+
+// jsonSubject is one accumulating thing inside a project. Its time is part of
+// the project's, and the subjects of a project do not add up to it: most of a
+// project's time belongs to no subject in particular.
+type jsonSubject struct {
+	Subject      string `json:"subject"`
+	Attention    string `json:"attention"`
+	AttentionMS  int64  `json:"attention_ms"`
+	Background   string `json:"background"`
+	BackgroundMS int64  `json:"background_ms"`
+	Events       int    `json:"events"`
+	Days         int    `json:"days"`
 }
 
 type jsonSource struct {
@@ -591,6 +982,8 @@ func jsonTotalsOf(t Totals, o Options) jsonTotals {
 	for _, p := range t.Projects {
 		out.Projects = append(out.Projects, jsonProject{
 			Project:      p.Name,
+			Work:         p.Work,
+			Subjects:     jsonSubjects(p.Subjects),
 			Attention:    hm(p.Attention),
 			AttentionMS:  ms(p.Attention),
 			Background:   hm(p.Background),
@@ -612,6 +1005,22 @@ func jsonSources(counts []SourceCount) []jsonSource {
 	out := []jsonSource{}
 	for _, c := range counts {
 		out = append(out, jsonSource(c))
+	}
+	return out
+}
+
+func jsonSubjects(subjects []Subject) []jsonSubject {
+	out := []jsonSubject{}
+	for _, s := range subjects {
+		out = append(out, jsonSubject{
+			Subject:      s.Name,
+			Attention:    hm(s.Attention),
+			AttentionMS:  ms(s.Attention),
+			Background:   hm(s.Background),
+			BackgroundMS: ms(s.Background),
+			Events:       s.Events,
+			Days:         s.Days,
+		})
 	}
 	return out
 }

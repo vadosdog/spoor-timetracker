@@ -21,6 +21,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -28,8 +29,9 @@ import (
 
 // Config is the whole file. It grows one section per stage.
 type Config struct {
-	Browser Browser `yaml:"browser"`
-	Report  Report  `yaml:"report"`
+	Browser     Browser     `yaml:"browser"`
+	Report      Report      `yaml:"report"`
+	Attribution Attribution `yaml:"attribution"`
 }
 
 // Report configures how events are turned into a day.
@@ -127,6 +129,316 @@ type Browser struct {
 	// without spoor having to know it exists. Only Chrome has been run
 	// against a real profile, so trying is all it is.
 	History []string `yaml:"history"`
+}
+
+// Attribution is the dictionary: which project an event belongs to, and which
+// accumulating thing inside that project.
+//
+// It is read when a report is built, never when events are imported. Rules
+// therefore apply to everything in the database, including what was imported
+// years before the rule was written — which is the whole reason collecting and
+// reporting are two commands. Change a line here and run the report again.
+//
+// The target was twenty lines covering ninety per cent of events. Measured, it
+// holds for directories and not for browsing: about fifteen path rules named
+// every working directory on the machine this was written on, while a hundred
+// lines named 83.6% of events and the rest is not addressable by more lines —
+// over half of what was left is on keys the dictionary refuses on purpose, and
+// the remainder is a tail of hundreds of hosts seen once each.
+//
+// So a dictionary that has to list every host somebody visits has stopped
+// being a dictionary, and that is not a failure: the block a visit falls in is
+// what names it, and it does.
+type Attribution struct {
+	// Fallback says what happens to a Claude Code event no rule names:
+	// "cwd-basename" keeps the crude guess made at import time, "none" leaves
+	// it to be inherited from the block around it like a browser visit.
+	//
+	// The default is the crude guess, so that adding a first rule cannot take
+	// a name away from an event that already had one. It is the blunt control:
+	// a single directory is silenced with never.paths below, which leaves the
+	// guess working everywhere else so that a new directory still shows up.
+	Fallback Fallback `yaml:"fallback"`
+
+	// Never lists traces that must not name a project: browser keys under Keys,
+	// working directories under Paths. A search engine, a wiki root or an issue
+	// tracker's home serves every project at once — one key on real data carried
+	// a sixth of all browsing — and the right answer for those is no project
+	// rather than the wrong project. What they were
+	// about is decided by the block around them, which is where the evidence
+	// actually is.
+	//
+	// It takes the key away, not the event. A rule reading the page title
+	// still applies, and should: the title of a tracker page names the board or
+	// the repository, which is the thing the host does not. That is what makes
+	// an issue tracker work here without an API, and it is why this list and
+	// Titles below are not in conflict.
+	//
+	// A path here names the one directory written, not the tree under it — the
+	// opposite of a path under a project. See pathPattern in the rules package
+	// for why. The tree is two entries, "~/x" and "~/x/*": a trailing "*" is a
+	// plain string prefix here as everywhere else, so "~/x*" would take
+	// "~/xylophone" as well.
+	//
+	// An entry loses to a more specific rule of its own kind, and wins over a
+	// less specific one. That is what makes both directions expressible: a bare
+	// host under Keys matches every segment of it, so a narrower entry here
+	// carves one segment out — and silencing a whole directory does not take
+	// away the rule on the one checkout inside it, which matters because
+	// `report --unmatched` prints the home directory as something to decide
+	// about.
+	//
+	// The everyday use is neither: a trace nobody has written a rule for is
+	// unnamed in any case, so putting it here says so deliberately, which is
+	// what keeps it out of the list `report --unmatched` prints.
+	//
+	// Entries have the same shape as Keys and Paths below.
+	Never Never `yaml:"never"`
+
+	// Subjects are tried inside every project, after that project's own list.
+	// One line here — an issue key in a page title — covers every tracker,
+	// every repository host and every branch at once.
+	Subjects []Subject `yaml:"subjects"`
+
+	// Projects are tried in the order written, but a more specific rule wins
+	// over a less specific one whatever the order: a longer path or a longer
+	// browser key beats a shorter one, and either beats a regular expression.
+	// Order decides only between rules that are equally specific.
+	Projects []Project `yaml:"projects"`
+}
+
+// Project is one entry of the dictionary: a name, the rules that give an event
+// that name, and the things inside it worth counting separately.
+type Project struct {
+	// Name is what the report calls it. It replaces the name guessed at import
+	// time, which is why one project spread over several directories comes out
+	// as one row.
+	Name string `yaml:"name"`
+
+	// Work marks the project as work rather than personal. Left out, it says
+	// nothing — which is not the same as "personal". The measurement that
+	// motivated it found personal projects carrying more than twice the hours
+	// of work ones, so a tool that assumed either way would be wrong about
+	// most of somebody's day.
+	Work *bool `yaml:"work"`
+
+	// Paths match the working directory of a Claude Code event. An entry names
+	// a directory and matches it and everything under it, so a checkout and a
+	// subdirectory opened separately are one project — and two directories
+	// that merely end in the same word are not. A trailing "*" makes it a
+	// plain prefix instead, for the temporary worktrees an agent creates with
+	// a random suffix.
+	//
+	// "~" is the home directory. Nothing else is expanded: a config that
+	// interpolated environment variables would read differently under cron.
+	Paths Strings `yaml:"paths"`
+
+	// Keys match a browser visit. The key is host[:port][/first-segment] —
+	// exactly what the report prints in its evidence column, so a line of the
+	// report can be pasted here. An entry without a port matches any port, an
+	// entry without a segment matches any segment, and a bare host also
+	// matches its subdomains.
+	Keys Strings `yaml:"keys"`
+
+	// Branches are regular expressions over the git branch. Useful as a last
+	// resort only: on real data 57% of branches are "HEAD" or "master", which
+	// name nothing. A branch says much more about the subject than about the
+	// project.
+	Branches Regexps `yaml:"branches"`
+
+	// Titles are regular expressions over the page title. This is what stands
+	// in for an issue tracker integration: the issue key lives in a path
+	// segment spoor deliberately does not store, and in the title, which it
+	// does.
+	Titles Regexps `yaml:"titles"`
+
+	// Subjects are the second level of grouping, and the last: there is no
+	// third. An episode, a level, a feature, a ticket — something that spans
+	// weeks and is not a project of its own.
+	Subjects []Subject `yaml:"subjects"`
+}
+
+// Subject is the accumulating thing inside a project: episode 14, level 3, one
+// feature, one ticket.
+//
+// Two levels, deliberately, and no more. A tree of arbitrary depth would need
+// a way to ask about a level of it, and every report would have to say which
+// level it was answering about; the question people actually ask is "how long
+// did this one thing take", and one level below the project answers it.
+type Subject struct {
+	// Name is what the subject is called. Left out, the first capture group of
+	// whichever expression matched becomes the name — which is how one line
+	//
+	//	subjects: [{titles: '\b([A-Z]+-\d+)\b'}]
+	//
+	// gives every ticket a subject of its own without listing any of them.
+	Name string `yaml:"name"`
+
+	Paths    Strings `yaml:"paths"`
+	Keys     Strings `yaml:"keys"`
+	Branches Regexps `yaml:"branches"`
+	Titles   Regexps `yaml:"titles"`
+}
+
+// Never is the two lists of traces that must not name a project.
+//
+// A directory needs this as much as a host does, and for longer: a scratch
+// directory nobody has written a rule for is named by the last element of its
+// path, which is a guess, and the only way to refuse that guess used to be
+// Fallback — which turns it off everywhere at once. A path here is the way to
+// say "I have decided about this one" while new directories still surface.
+//
+// A path on this list also beats Fallback. Otherwise the guess would name what
+// the list just refused, and the entry would do nothing at all.
+type Never struct {
+	Keys  Strings `yaml:"keys"`
+	Paths Strings `yaml:"paths"`
+}
+
+// UnmarshalYAML accepts the two lists, and also a bare list of keys — which is
+// what this section was before paths existed, and what is written in every
+// config that predates them.
+//
+// The mapping is walked by hand rather than handed to Decode, because
+// Node.Decode does not carry the decoder's KnownFields setting: a misspelt key
+// inside here would be silently ignored, and this file promises the opposite.
+func (n *Never) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		if err := n.Keys.UnmarshalYAML(node); err != nil {
+			return fmt.Errorf("line %d: want a list of keys, or a mapping of \"keys\" and \"paths\"", node.Line)
+		}
+		return nil
+	}
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		name, value := node.Content[i], node.Content[i+1]
+		var into *Strings
+		switch name.Value {
+		case "keys":
+			into = &n.Keys
+		case "paths":
+			into = &n.Paths
+		default:
+			return fmt.Errorf("line %d: no such key %q under never; there are \"keys\" and \"paths\"",
+				name.Line, name.Value)
+		}
+		// yaml.v3 refuses a repeated key by itself; walking the mapping here
+		// means saying so here too, or the second one would silently win.
+		if seen[name.Value] {
+			return fmt.Errorf("line %d: %q is given twice under never", name.Line, name.Value)
+		}
+		seen[name.Value] = true
+		// A key with no value is an empty list, not a list holding one empty
+		// entry. Decoding null through Strings would produce the latter, and
+		// then every run would warn about a rule nobody wrote.
+		if value.Tag == "!!null" {
+			continue
+		}
+		if err := into.UnmarshalYAML(value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Fallback is what an unmatched Claude Code event keeps.
+type Fallback string
+
+const (
+	// FallbackCWDBasename keeps the last element of the working directory, the
+	// guess made at import time. The default.
+	FallbackCWDBasename Fallback = "cwd-basename"
+	// FallbackNone drops it, leaving the event to be named by the block around
+	// it or not at all.
+	FallbackNone Fallback = "none"
+)
+
+// UnmarshalYAML refuses a value that is neither, rather than quietly keeping
+// the default: a misspelt "cwd_basename" would otherwise silently mean the
+// opposite of what somebody who bothered to write the key wanted.
+func (f *Fallback) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err != nil {
+		return fmt.Errorf("line %d: want %q or %q, got %s", node.Line, FallbackCWDBasename, FallbackNone, node.Tag)
+	}
+	switch Fallback(s) {
+	case FallbackCWDBasename, FallbackNone:
+		*f = Fallback(s)
+		return nil
+	}
+	return fmt.Errorf("line %d: %q is not a fallback; there are %q and %q",
+		node.Line, s, FallbackCWDBasename, FallbackNone)
+}
+
+// Or returns the fallback, or the default when the key was left out.
+func (f Fallback) Or(def Fallback) Fallback {
+	if f == "" {
+		return def
+	}
+	return f
+}
+
+// Strings is a list that may be written as one value. Most rules have exactly
+// one path or one key, and "paths: ~/src/thing" reads better than a sequence
+// of one — which matters when the whole file is meant to be twenty lines.
+type Strings []string
+
+// UnmarshalYAML accepts a scalar or a sequence.
+func (s *Strings) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		var one string
+		if err := node.Decode(&one); err != nil {
+			return fmt.Errorf("line %d: want a string or a list of them, got %s", node.Line, node.Tag)
+		}
+		*s = Strings{one}
+		return nil
+	}
+	var many []string
+	if err := node.Decode(&many); err != nil {
+		return fmt.Errorf("line %d: want a string or a list of them, got %s", node.Line, node.Tag)
+	}
+	*s = many
+	return nil
+}
+
+// Regexp is a regular expression compiled while the config is read, so that a
+// broken one is a config error naming its line rather than a rule that
+// silently matches nothing.
+type Regexp struct{ *regexp.Regexp }
+
+// UnmarshalYAML compiles the expression.
+func (r *Regexp) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err != nil {
+		return fmt.Errorf("line %d: want a regular expression, got %s", node.Line, node.Tag)
+	}
+	re, err := regexp.Compile(s)
+	if err != nil {
+		return fmt.Errorf("line %d: %q is not a regular expression: %w", node.Line, s, err)
+	}
+	r.Regexp = re
+	return nil
+}
+
+// Regexps is Strings for expressions: one may be written on its own.
+type Regexps []Regexp
+
+// UnmarshalYAML accepts a scalar or a sequence.
+func (r *Regexps) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		var one Regexp
+		if err := one.UnmarshalYAML(node); err != nil {
+			return err
+		}
+		*r = Regexps{one}
+		return nil
+	}
+	var many []Regexp
+	if err := node.Decode(&many); err != nil {
+		return err
+	}
+	*r = many
+	return nil
 }
 
 // Load reads the config file. A missing file yields a zero Config and no

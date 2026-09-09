@@ -91,6 +91,9 @@ internal/cli         commands and flags
 internal/config      the optional YAML file under $XDG_CONFIG_HOME
 internal/event       the record every source produces
 internal/store       SQLite: schema, inserts, queries
+internal/rules       the dictionary: which project an event is, and which
+                     subject inside it. Compiled from the config, applied
+                     when a report is built
 internal/report      blocks, attribution, the four numbers, both renderers
 internal/source/…    one package per source: claudecode, browser
 internal/paths       XDG locations
@@ -115,10 +118,65 @@ docs/status.md       where the work stopped and what is next
   afterwards. Two separate review rounds caught a rule that had been
   tightened in the prose and left stale in the two column comments, and
   `schema.sql` is the one a user reads with the database open.
+- **Stdout is the answer; anything else goes to stderr.** `report --json` is a
+  document a program reads, so one warning printed on stdout makes it
+  unparseable — including for the reproducibility check README asks people to
+  run. Warnings, notes and "nothing found" belong on stderr, and a command that
+  finds nothing still prints an empty document rather than a sentence. This was
+  got wrong once already, in the stage that added the first warning to
+  `report`.
+- **A setting that can quietly do nothing ships with the check that says so,
+  and the check covers every list the setting touches.** A config line that
+  parses, looks right and never fires is the worst failure this file has: it is
+  invisible from the report, and it survives every test that does not look for
+  it. The stage that added the dictionary built `Problem` for exactly this and
+  then produced three cases it did not cover — a key the report printed and the
+  parser could not read back, a silence that swallowed a subtree, a rule made
+  unreachable by a refusal of equal specificity. Two were found by review and
+  one by measurement, none by a test. So: when a mechanism gains a second list,
+  the check gains it in the same change, and the message names the role of what
+  it is talking about, because a project and a subject may share a name.
 - **Update `docs/status.md` at the end of a stage.** In a month the context
   will be gone.
 - **English in this repository** — code, comments, docs, commit messages.
   The audience is international.
+
+## What the dictionary is for, and what it must not become
+
+- **Rules run when a report is built, never at import.** An imported event is
+  never re-parsed, so a rule applied at import would reach only what was
+  collected after it was written. Applied at report time, one edit renames a
+  year of history. The `project` column keeps whatever the source guessed;
+  the dictionary overrides it, and the two are allowed to differ.
+- **Deterministic, and that is the whole of it.** A literal path, a literal
+  browser key, a regular expression, and a written order to break ties. No
+  similarity, no scoring, no model. The most specific match wins whatever the
+  file order, and a literal beats an expression: where something happened is
+  better evidence than what a piece of text looked like.
+- **A fat key must give no project rather than a wrong one.** One search
+  engine was a sixth of all browsing measured. `never` is for those, and for
+  directories nobody has decided about — it takes the *trace* away, not the
+  event, so a rule reading the page **title** or the **branch** still applies.
+  That is deliberate: the host of an issue tracker says only "the tracker", and
+  the title says which board or repository. It is what replaces an API, and it
+  must stay that way round.
+  A never entry **loses to a more specific rule of its own kind**, and the floor
+  it raises is per kind. And a silenced path names **one directory**, where a
+  project's path names the tree. Both come from the same paste: `--unmatched`
+  prints the home directory as a candidate, so a subtree there took away every
+  rule underneath it and swallowed a directory of 1104 events out of every
+  list at once. The tree is two entries — `[~/x, ~/x/*]` — because
+  `*` is a plain string prefix here as everywhere else, and `~/x*` would take
+  `~/xylophone` too.
+- **Two levels. There is no third.** A project and a subject inside it. A
+  subject takes its time by the same rule as a project and **never inherits**
+  from a neighbouring block, so the subjects of a project do not add up to it.
+- **The guess stays as a fallback.** `basename(cwd)` is wrong in both
+  directions at once and it is still the default for anything unmatched,
+  because a first rule must not take a name away from everything else.
+  `report --unmatched` is what stops that being invisible; it is the
+  maintenance loop, and anything that makes the dictionary harder to grow
+  line by line is the wrong change.
 
 ## What the Claude Code source knows about its own format
 

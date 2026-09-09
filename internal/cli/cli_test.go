@@ -63,6 +63,18 @@ func run(t *testing.T, args ...string) string {
 	return out.String()
 }
 
+// runBoth is run when the point of the test is what went to stderr. The two
+// streams are kept apart on purpose: `report --json` writes a document to
+// stdout, so a warning printed there would make it unparseable.
+func runBoth(t *testing.T, args ...string) (stdout, stderr string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	if code := Run(args, &out, &errOut); code != 0 {
+		t.Fatalf("spoor %s exited %d: %s%s", strings.Join(args, " "), code, out.String(), errOut.String())
+	}
+	return out.String(), errOut.String()
+}
+
 // ingest runs an import that touches nothing real. Every source that looks
 // somewhere by default has to be pointed elsewhere or switched off here: a
 // test that quietly imports the machine's own browsing history would both
@@ -663,5 +675,234 @@ func TestReportDoesNotChangeTheDatabase(t *testing.T) {
 	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		t.Errorf("the database changed: %d bytes at %s, then %d at %s",
 			before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+}
+
+// withConfig is reportArgs with a config file of the caller's own, which is
+// what every attribution test needs: the rules live nowhere else.
+func withConfig(t *testing.T, db, body string, extra ...string) []string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return append([]string{"report", "--db", db, "--config", path}, extra...)
+}
+
+// The dictionary is read when the report is built, not when events are
+// imported. That is what lets a rule written today name what was collected
+// last year — and it is the reason collecting and reporting are two commands.
+func TestARuleNamesEventsThatWereImportedBeforeIt(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "projects")
+	db := filepath.Join(tmp, "spoor.db")
+	week(t, src, time.Date(2026, 8, 25, 0, 0, 0, 0, time.Local), 7)
+	ingest(t, db, src, "--quiet")
+
+	before := run(t, reportArgs(t, db, "--week=2026-08-26")...)
+	if !strings.Contains(before, "widget") {
+		t.Fatalf("the import guess is not there to begin with:\n%s", before)
+	}
+
+	after := run(t, withConfig(t, db, `
+attribution:
+  projects:
+    - name: renamed-by-a-rule
+      paths: /home/u/projects
+`, "--week=2026-08-26")...)
+	if !strings.Contains(after, "renamed-by-a-rule") {
+		t.Errorf("the rule did not reach events imported before it existed:\n%s", after)
+	}
+	if strings.Contains(after, "widget") {
+		t.Errorf("the import guess survived a rule that covers it:\n%s", after)
+	}
+}
+
+// A line that can never match anything is a warning rather than a failure: one
+// unusable rule is not a reason to refuse to report at all, and a rule that
+// silently does nothing is the failure this is here to prevent.
+func TestAnUnusableRuleIsAWarning(t *testing.T) {
+	db := reportFixture(t)
+	const broken = `
+attribution:
+  projects:
+    - name: broken
+      keys: https://example.com/a
+`
+	out, errOut := runBoth(t, withConfig(t, db, broken, "--week=2026-08-26")...)
+	if !strings.Contains(errOut, "warning: attribution:") {
+		t.Errorf("no warning about an unusable rule:\n%s", errOut)
+	}
+	if !strings.Contains(out, "widget") {
+		t.Errorf("the report itself did not run:\n%s", out)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("the warning went to stdout, where the document is:\n%s", out)
+	}
+
+	// And the document stays a document. A warning at the top of --json would
+	// break every reader of it, including the reproducibility check the README
+	// asks people to run.
+	asJSON, _ := runBoth(t, withConfig(t, db, broken, "--week=2026-08-26", "--json")...)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(asJSON), &doc); err != nil {
+		t.Errorf("--json with an unusable rule is not JSON: %v\n%s", err, asJSON)
+	}
+}
+
+// "How long has this taken" has no range of its own, so it takes the whole
+// database. The fixture's week is longer than a day, which is what makes the
+// difference visible.
+func TestSubjectTakesTheWholeDatabase(t *testing.T) {
+	db := reportFixture(t)
+	const cfg = `
+attribution:
+  projects:
+    - name: widget
+      paths: /home/u/projects/widget
+      subjects:
+        - name: the feature
+          branches: 'main'
+`
+	out := run(t, withConfig(t, db, cfg, "--subject", "the feature")...)
+	if !strings.Contains(out, "the feature") || !strings.Contains(out, "widget") {
+		t.Fatalf("the subject view says nothing about the subject:\n%s", out)
+	}
+	if !strings.Contains(out, "7 days with traces") {
+		t.Errorf("the subject did not take the whole database:\n%s", out)
+	}
+
+	// And --day narrows it, which is a different and equally reasonable
+	// question.
+	narrowed := run(t, withConfig(t, db, cfg, "--subject", "the feature", "--day=2026-08-26")...)
+	if !strings.Contains(narrowed, "1 day with traces") {
+		t.Errorf("--day did not narrow the subject:\n%s", narrowed)
+	}
+}
+
+func TestSubjectThatIsNotOneSaysSo(t *testing.T) {
+	db := reportFixture(t)
+	out := run(t, withConfig(t, db, `
+attribution:
+  projects:
+    - name: widget
+      paths: /home/u/projects/widget
+      subjects:
+        - name: the feature
+          branches: 'main'
+`, "--subject", "a feature nobody has")...)
+	if !strings.Contains(out, "nothing") {
+		t.Errorf("a subject with no time does not say so:\n%s", out)
+	}
+	if !strings.Contains(out, "the feature") {
+		t.Errorf("it does not say which subjects do have time:\n%s", out)
+	}
+}
+
+// The maintenance loop: what has no rule yet, busiest first, in the form it is
+// written in.
+func TestUnmatchedListsWhatNeedsARule(t *testing.T) {
+	db := reportFixture(t)
+	out := run(t, withConfig(t, db, `
+attribution:
+  projects:
+    - name: something-else
+      paths: /nowhere
+`, "--unmatched")...)
+	if !strings.Contains(out, "/home/u/projects/widget") {
+		t.Errorf("the directory with no rule is not listed:\n%s", out)
+	}
+
+	covered := run(t, withConfig(t, db, `
+attribution:
+  projects:
+    - name: widget
+      paths: /home/u/projects/widget
+`, "--unmatched")...)
+	if strings.Contains(covered, "/home/u/projects/widget") {
+		t.Errorf("a directory a rule covers is still listed:\n%s", covered)
+	}
+	if !strings.Contains(covered, "covered by a rule") {
+		t.Errorf("nothing left to decide, and it does not say so:\n%s", covered)
+	}
+}
+
+func TestSubjectAndUnmatchedTogetherAreRefused(t *testing.T) {
+	db := reportFixture(t)
+	out := fails(t, reportArgs(t, db, "--subject", "x", "--unmatched")...)
+	if !strings.Contains(out, "pick one") {
+		t.Errorf("two views at once were not refused: %s", out)
+	}
+}
+
+func TestTimelineWithAnotherViewIsRefused(t *testing.T) {
+	db := reportFixture(t)
+	for _, extra := range [][]string{{"--subject", "x"}, {"--unmatched"}} {
+		out := fails(t, reportArgs(t, db, append([]string{"--timeline"}, extra...)...)...)
+		if !strings.Contains(out, "does not apply") {
+			t.Errorf("--timeline %v was not refused: %s", extra, out)
+		}
+	}
+}
+
+// The flag has to mean the same thing in every view. It used to be printed as
+// advice in the subject view — "pass --count-background" — to a reader who had
+// just passed it.
+func TestCountBackgroundReachesTheSubjectView(t *testing.T) {
+	db := reportFixture(t)
+	const cfg = `
+attribution:
+  projects:
+    - name: widget
+      paths: /home/u/projects/widget
+      subjects:
+        - name: the feature
+          branches: 'main'
+`
+	off := run(t, withConfig(t, db, cfg, "--subject", "the feature")...)
+	if !strings.Contains(off, "pass --count-background") {
+		t.Errorf("the subject view does not say the background is left out:\n%s", off)
+	}
+	on := run(t, withConfig(t, db, cfg, "--subject", "the feature", "--count-background")...)
+	if strings.Contains(on, "pass --count-background") {
+		t.Errorf("the subject view still advises a flag that was given:\n%s", on)
+	}
+	if !strings.Contains(on, "counted") {
+		t.Errorf("--count-background added no counted line:\n%s", on)
+	}
+}
+
+// An empty database and a dictionary with no work left in it are the same
+// empty list and opposite answers. Both new views have to survive a database
+// that has been created and never imported into.
+func TestTheNewViewsSurviveAnEmptyDatabase(t *testing.T) {
+	tmp := t.TempDir()
+	db := filepath.Join(tmp, "spoor.db")
+	src := filepath.Join(tmp, "projects")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ingest(t, db, src, "--quiet")
+
+	unmatched, errOut := runBoth(t, reportArgs(t, db, "--unmatched")...)
+	if !strings.Contains(unmatched, "No traces") {
+		t.Errorf("--unmatched on an empty database does not say it is empty:\n%s", unmatched)
+	}
+	if strings.Contains(unmatched, "covered by a rule") {
+		t.Errorf("an empty database reads as a finished dictionary:\n%s", unmatched)
+	}
+	if !strings.Contains(errOut, "no traces at all") {
+		t.Errorf("nothing on stderr about the empty database: %q", errOut)
+	}
+
+	// And --json is still a document rather than a sentence.
+	asJSON, _ := runBoth(t, reportArgs(t, db, "--unmatched", "--json")...)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(asJSON), &doc); err != nil {
+		t.Errorf("--unmatched --json on an empty database is not JSON: %v\n%s", err, asJSON)
+	}
+	subject, _ := runBoth(t, reportArgs(t, db, "--subject", "anything", "--json")...)
+	if err := json.Unmarshal([]byte(subject), &doc); err != nil {
+		t.Errorf("--subject --json on an empty database is not JSON: %v\n%s", err, subject)
 	}
 }

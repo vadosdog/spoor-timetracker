@@ -735,9 +735,283 @@ still is not a project.
   of it, and moving it moves the headline number a long way. The sensitivity
   table lives with the measurements outside this repository.
 
-## Next: projects and attribution
+## Stage 3 — projects and attribution. Done 2026-09-08.
 
-A config mapping paths, branches and domains to projects — twenty lines that
-should cover ninety per cent — and the accumulating thing one level below a
-project. The report is what says which domains are worth writing down: the
-unnamed row, and the browser keys under each project, are that list.
+Which project an event belongs to is now a dictionary in the config file —
+paths, browser keys, branches and page titles — and one level below that, the
+subject: the thing that spans weeks. `spoor report --subject NAME` answers how
+long one of those has taken over the whole database, and
+`spoor report --unmatched` says which line of the dictionary is missing.
+
+Nothing was added to the database and no source was touched. The rules are
+applied when a report is built.
+
+### What is in place
+
+- `internal/rules` — the compiled dictionary. Four kinds of rule, a written
+  order to break ties, and one function that says whether an event is covered
+  at all.
+- `internal/config` grew an `attribution` section: `fallback`, `never`,
+  `subjects`, `projects`. Regular expressions are compiled while the file is
+  read, so a broken one names its line. `never` takes two lists — `keys` and
+  `paths` — and still reads a bare list as `keys`.
+- `internal/report` grew subjects, the two views above, and `work` on a
+  project row.
+- `internal/store` — `EventsBetween` now loads `title`, and `Range` says what
+  the whole database spans.
+- One change to what stage 2 printed: a browser key whose host is an address
+  is now written with brackets — `[::1]:3000/app` rather than `::1:3000/app` —
+  wherever a key appears. The old form cannot be read back, and a key is no
+  longer only printed: it is what the config is written from.
+- `internal/cli` grew `--subject` and `--unmatched`.
+
+### Why the rules run at report time
+
+An imported event is never re-parsed. A rule applied at import would therefore
+reach only what was collected after it was written, and the dictionary would
+be a thing you could only get right in advance.
+
+Applied when the report is built, one edit renames a year of history, and a
+rule that turns out to be wrong costs a re-run rather than a re-import. This
+is the same reason collecting and reporting are two commands, and it is what
+makes the numbers below arguable at all: every one of them was produced by
+running the same events through two different config files.
+
+### The four rules and how they are chosen between
+
+| Key | Matches | Against |
+|---|---|---|
+| `paths` | a directory and everything under it; `~` for home; a trailing `*` for a plain prefix | `cwd` |
+| `keys` | `host[:port][/first-segment]` — what the report prints | a browser visit |
+| `branches` | a regular expression | `git_branch` |
+| `titles` | a regular expression | `title` |
+
+Any one matching is enough, and the most specific match wins whatever order
+the file is in: a longer path beats a shorter one, a longer key beats a
+shorter one, and a literal beats an expression — where something happened is
+better evidence than what a piece of text looked like. Two expressions cannot
+be compared, so between them the written order decides, always the same way.
+
+**A path rule covers what is under it**, which is the half of the old guess
+that mattered most: on real data one project was spread over four directory
+names, and `/tmp` worktrees created per session added a dozen more.
+
+**`never` takes the trace away, not the event.** A rule reading the title still
+applies to a key on that list, and that is the point rather than an oversight:
+the host of an issue tracker says only "the tracker", while the title says
+which board or which repository. Measured: on the tracker in use here, 63% of
+titles name the team or the board, and on the GitLab instance 93% name the
+repository. That is the whole of the tracker support — no API, no network.
+
+It applies to directories as well as hosts, and there it earns more: a host
+with no rule is unnamed, while a directory with no rule is named by the last
+element of its path. Without `never.paths` the only way to refuse that guess is
+to turn it off everywhere, which also stops a directory nobody has seen before
+from appearing as a row of its own. Measured on a real dictionary: silencing
+three known directories with the guess left on gives the same numbers, to the
+digit, as turning the guess off — and four temporary directories still show up
+in `report --unmatched` that the blunt switch had swallowed.
+
+**And a never entry loses to a more specific rule of its own kind.** That is not
+symmetry for its own sake: `report --unmatched` prints the home directory as
+something to decide about, and pasting it in used to take away every rule
+underneath it at once. Now it silences what nothing else speaks for, and the
+checkout inside it keeps its name. The floor is per kind, so a silenced host
+never reaches a path rule.
+
+**A silenced path names one directory; a project's path names the tree.** The
+asymmetry is deliberate and it comes from the same paste. Silencing says "I
+looked at this directory and it names nothing", which is a statement about the
+one directory somebody looked at — so what is underneath keeps the guess and
+stays in the list of things to decide about. Measured on the real dictionary:
+under the subtree reading, silencing the home directory swallowed a directory
+holding 1104 events and forty minutes, which then existed in no list at all.
+
+The tree is two entries — `[~/scratch, ~/scratch/*]` — because a trailing `*`
+is a plain string prefix here as everywhere else in the config, and `~/scratch*`
+alone would also take `~/scratchpad`. That is a sharper edge than it looks on a
+control whose whole purpose is to silence no more than was meant, and the docs
+say so rather than offering the one-character version.
+
+### Subjects: the second level, and the last
+
+A subject is an episode, a level, a feature, a ticket. It is written like a
+project rule with a name; with **no** name, the first capture group of the
+expression that matched becomes the name, so
+
+```yaml
+subjects:
+  - titles: '\b([A-Z]+-\d+)\b'
+```
+
+gives every ticket a subject of its own without listing any of them.
+
+There is no third level on purpose. A tree of any depth would make every
+report say which depth it was answering about; the question people ask is how
+long one thing took.
+
+**A subject never inherits.** A project can take its name from the block
+around it. A ticket number in a page title says that page was about that
+ticket and says nothing about the hour that followed, so a subject holds the
+stretch of the day around its own traces and no more — by exactly the rule
+projects are cut by, the stretch belonging to the nearest human touch. The
+consequence is that the subjects of a project do not add up to it, and the
+report says so on the line above them.
+
+### Acceptance
+
+Measured on the same fourteen-day window as stages 1.5 and 2, by running the
+same database through two configs: an empty one and the author's dictionary of
+about a hundred lines. Absolute numbers live outside this repository with the
+rest of the measurements.
+
+| Check | Without rules | With the dictionary |
+|---|---|---|
+| Events carrying a project of their own | 78.7% | 83.6% |
+| Browser events carrying one | 0% | 23.3% |
+| Events with no project after inheritance | 0.8% (256) | 0.8% (258) |
+| Active time with no project | 2.7% | 2.6% |
+| Project rows over the window | 44 | 17 |
+| `active` in total | identical to the millisecond | identical to the millisecond |
+
+Browsing is the whole of the first two lines: every Claude Code event already
+had a name from its working directory, and no browser event had one at all,
+so the dictionary is the only thing that can give one.
+
+The row count is the result, and the two lines above it are the honest
+disappointment. The dictionary did not make the report name more: inheritance
+was already leaving 0.8% of events and 2.7% of the active time unnamed, and
+there was nothing there to take. What it changed is that the names are
+**right**. Of the
+44 rows, more than half were fragments: subdirectories of one project, a
+temporary worktree, the last element of a path that two unrelated checkouts
+share. One project came out sixteen hours larger, having been split across
+four other names and a browser host nothing had claimed.
+
+The share with no project after inheritance did not move — and the count
+behind it went **up**, from 256 events to 258, while the time behind it went
+down from 2.7% to 2.6%. The two directions are the same effect: naming more
+events by rule gives the neighbours of an unnamed block more to disagree
+about, and a block whose two neighbours disagree stays unnamed on purpose.
+Better attribution makes the remaining ambiguity visible rather than smaller,
+and two events is what that cost here.
+
+### What is deliberately not done
+
+- **No rule combines two fields.** A rule is any-of, never all-of: there is no
+  way to say "this host **and** this title". It was not needed on real data —
+  the title alone is specific enough where it matters — and every attempt to
+  write the syntax moved the twenty-line target further away, not nearer.
+- **Nothing is written back.** The dictionary is edited by hand. Naming a
+  block in an interface and having that answer stored as a rule is the
+  terminal interface, one stage on; `--unmatched` is the part of it that can
+  be had without one.
+- **`work` is carried and not summed.** It reaches `--json` and stops there.
+  What a work/personal split should look like in a report is a question for
+  whoever wants one; the flag exists so the question can be asked of real
+  data.
+- **`turn_duration` is still unused.** It was looked at again for this stage
+  and it cannot yet replace the head and tail estimate: 244 events carry one
+  in a database of 83,000, and what it measures is a whole turn rather than
+  the time somebody spent typing. It stays a loose end.
+
+### Loose ends for whoever comes next
+
+- **A subject collects only the time around traces that carry it, and that is
+  most of what there is to know about the second level.** Measured on a real
+  dictionary over a fortnight: subjects covered 37% of the time their *projects*
+  covered, ranging from 86% down to 20%. (The 3.5% quoted in README for issue
+  keys is a different denominator — the time that issue was worked on, not the
+  time its project holds.) The clearest case is a project whose
+  subject rule is *identical to its own* — it still covered only 44%, because
+  the browsing inside its blocks takes the project by inheritance and cannot
+  take the subject.
+
+  The ceiling was measured too, by promoting every subject to a project so that
+  it inherited: coverage went from a third of the time to nearly all of it. The
+  rule was left as it is anyway. What raises coverage honestly is leaving the
+  same name on the folder, the branch and the ticket — a person can do that in
+  a week, and a rule that guesses cannot be argued with afterwards.
+- **Time inside a block follows the nearest human touch, so a rule pointed
+  where your touches do not reach gets traces and little or no time.** One
+  directory in the measured data held 2983 events and exactly two prompts, both
+  from subagents: the person prompted from the parent and the agent worked in
+  the child. As a subject it produced no time at all; as a project it would get
+  a row with a wall time and no hours.
+
+  It is worth being exact about which shape this is, because the other shape
+  behaves differently: a block with *no* touch in it at all — a session resumed
+  with its prompt in an earlier block — keeps each event's own name and counts
+  the time as background. The loss happens only when the touches are elsewhere
+  in the same block.
+
+  Nothing in the report says this out loud. The "spent time with an agent
+  working and none with you" line does not fire here: `liveSessions` compares
+  sessions rather than project names, and prompting from the parent while the
+  agent works in the child is one session — which is exactly the `cd` case that
+  comparison exists to survive. The line needs a second window to appear.
+- **A capture group prints whatever it captured.** The subject name comes out
+  of the page title, so an expression like `(.*)` would put a page title on
+  screen — and the title of a search results page is the query. `([A-Z]+-\d+)`
+  captures a key and not the query around it. Nothing caps or checks this: it
+  is the author's own expression in the author's own config, and the report
+  does what it was told.
+- **`EventsBetween` now loads `title`.** It was deliberately not loading it,
+  and the comment saying so has been replaced with one saying why it does. No
+  renderer prints it; `TestNeitherRendererPrintsATitleOrALabel` builds a report
+  with a distinctive title and greps every view — day, timeline, subject,
+  unmatched, both formats — for it. That test is the whole of the guarantee.
+- **`--unmatched` prints browser keys, and a first path segment is sometimes a
+  secret.** The same hazard the evidence column already had: a meeting code, a
+  bot token, a link shortener's slug. Nothing new is exposed — the report has
+  printed keys since stage 2 — but this view sorts by time and shows more of
+  them, so it is the command most likely to put one on screen.
+- **The same subject can appear under two projects.** A ticket page visited
+  during a block owned by one project and again during a block owned by
+  another produces two rows with the same subject name. That is the model
+  working — a subject is inside a project — but a person reading it will
+  expect one row and will have to add them up.
+
+  `--subject` does add them up, and there the same behaviour is a trap: two
+  projects that each have a subject called `release` are two different things,
+  and one headline number covers both. The per-project table underneath is the
+  only thing that shows it. A way to ask about one project's subject —
+  `--subject payments-api/release` — is the obvious fix and is not written.
+- **`--subject` and `--unmatched` load the whole database into memory.** Both
+  default to every day there is, and a report is built over all of them: on a
+  database of 83,000 events that is under a second and a few tens of
+  megabytes, but the database is meant to accumulate for years, and titles are
+  now loaded with the rest. Narrowing with `--week` is the workaround; a
+  streaming or windowed build is the fix nobody has needed yet.
+- **Time in `--unmatched` is not the report's time.** It is the stretch that
+  begins with each event, charged to whatever was on screen then, rather than
+  to the project the stretch counted for. It answers "how much of the day
+  happens around this host", which is the question a discovery list should
+  answer, and it does not add up to anything in the report.
+- **A dictionary of twenty lines does not close ninety per cent, and cannot.**
+  About a hundred lines named 83.6% of events, and the rest is mostly not
+  addressable by more lines: over half of what is left is on keys the
+  dictionary refuses on purpose — one search engine is a sixth of all browsing
+  — and the remainder is a tail of 303 keys over a fortnight, most seen once.
+  The block around them is what names those, and it does. The twenty-line
+  figure holds for the *directories*, which is where it came from.
+- **`fallback: cwd-basename` is on by default**, so a directory nobody has
+  written a rule for still gets a name, and that name is still wrong in both
+  directions. It is the right default — adding a first rule must not take a
+  name away from everything else — but it does mean the guess never fully goes
+  away unless it is turned off, and `--unmatched` is the only thing that says
+  which rows are still resting on it.
+- **A project name is a string, and two rules may share one.** That is how a
+  project written twice in the file is one project. It also means a typo in
+  the second entry is a second project, silently.
+- **Subjects have no dictionary of their own.** They exist only where a rule
+  found one, so a project with no subject rules has no subjects at all and
+  `--subject` has nothing to answer about. The message says so and lists what
+  does exist.
+
+## Next: the calendar, then confirming the day
+
+The calendar is the one gap no local trace can fill, and attributing a meeting
+to a project is this stage's dictionary doing the same job on a different
+source. After it, the terminal interface: walk the blocks, name what the rules
+could not, and store the answer as a rule so the question is asked once.

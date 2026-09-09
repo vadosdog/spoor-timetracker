@@ -21,9 +21,12 @@ There are no guarantees, no support and no promises about the next version.**
 ## Status
 
 Early. `spoor` imports those two sources into SQLite and reports what a day or
-a week went on: projects, hours, and the evidence for each. It cannot yet be
-told that a block was something other than what it guessed — naming things by
-hand, and an interface to do it in, are still ahead.
+a week went on: projects, hours, and the evidence for each. Which project
+something belongs to is decided by a dictionary you write in the config file:
+directory paths, browser keys, git branches and page titles. Below a project
+sits one more level, for the thing that spans weeks — an episode, a level, a
+feature, a ticket. What no rule covers is still named by guesswork, and there
+is no interface yet for correcting a block by hand.
 
 [docs/status.md](docs/status.md) says where the work stopped, and lists the
 known rough edges — read it before filing a bug, because the thing you found
@@ -39,9 +42,11 @@ where it now is.
 
 **Next**
 
-- **Projects and rules.** A config mapping paths, branches and domains to
-  projects, plus one level below that for something which spans weeks —
-  episode 14, level 3, a single feature.
+- **The calendar**, as a source. Meetings are the one gap no local trace can
+  fill — nothing happens on disk during a call — so a day with meetings reads
+  as empty where it was busy. A local `.ics` file first; fetching one from a
+  private URL stays an explicit, off-by-default flag, because this tool makes
+  no network call unless it is asked to.
 - **Confirming the day.** A terminal interface: walk the blocks, name what the
   rules could not, and have that answer stored as a rule, so the same question
   is not asked twice. Everything it does stays available as flags.
@@ -57,9 +62,10 @@ where it now is.
 - Export and import, plus a complaint when no import has run for a while.
   Until that exists the caveat under [Uninstall](#uninstall) stands.
 
-Undecided: the calendar. Meetings are the one gap no local trace can fill —
-nothing happens on disk during a call — but a calendar lives on the network,
-and this tool does not.
+Not planned: a Jira or Confluence integration. Both are used through the
+browser, which this already reads, and an API would buy exact edit times and
+issue statuses that the report does not need. That changes only if worklogs
+ever need writing *back*, which is a different thing entirely.
 
 ## What it never does
 
@@ -135,7 +141,8 @@ this file assumes `spoor` is runnable by name.
 spoor ingest [--db PATH] [--config PATH] [--claude-dir PATH]
              [--browser-history PATH] [--no-claude-code] [--no-browser] [--quiet]
 spoor report [--day[=YYYY-MM-DD] | --week[=YYYY-MM-DD]] [--json | --table]
-             [--timeline] [--min 5m] [--gap 10m] [--attention-window 5m]
+             [--timeline] [--subject NAME] [--unmatched]
+             [--min 5m] [--gap 10m] [--attention-window 5m]
              [--head 2m] [--tail 2m] [--count-background]
              [--db PATH] [--config PATH]
 spoor count  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--source NAME] [--db PATH]
@@ -227,6 +234,88 @@ project, the settings it ran under, and every duration twice — as `H:MM` and
 as milliseconds beside it. Two runs over the same database produce
 byte-identical output; there is a test for that, and step 9 below is how you
 check it yourself.
+
+Once any rule produces a subject, the day and the week grow one more section
+under the summary — the accumulating things the range touched, and which
+project each fell under:
+
+```
+subjects — inside the projects above, not extra to them
+  PAY-31  0:06  -  payments-api
+```
+
+Attention, then background, then the project. It is not a breakdown of the
+table above it and does not add up to it: most of a project's time belongs to
+no subject in particular. Eight lines, then a count of the rest.
+
+`--subject NAME` answers a different question: not what a day went on, but how
+long one thing has taken altogether. It reads the whole database unless
+`--day` or `--week` narrows it, because the thing it asks about — an episode, a
+feature, a ticket — has no date range of its own.
+
+```
+spoor report --subject PAY-31
+```
+
+```
+subject "PAY-31" — 2026-05-04 to 2026-05-06, 3 days with traces
+
+PROJECT       ATTENTION  BACKGROUND  EVENTS
+payments-api  0:18       -           6
+
+attention                       0:18  the column above, summed over every day this subject appears on
+agent worked in the background  -     not counted — pass --count-background to add it
+events                          6     traces that named this subject themselves
+
+by day
+  Mon 2026-05-04  attention 0:06  background -  2 events
+  Tue 2026-05-05  attention 0:06  background -  2 events
+  Wed 2026-05-06  attention 0:06  background -  2 events
+```
+
+The name is matched without regard to case, and a name that is not a subject
+says so and lists the ones that are — zero hours and a misspelling look
+identical otherwise. Where subjects come from is [Subjects](#subjects) below; with no rules there
+are none.
+
+`--unmatched` is the other side of the dictionary: the directories and browser
+keys in range that no rule mentions, busiest first, written the way they go
+into the config. It reads the whole database too.
+
+```
+spoor report --unmatched
+```
+
+```
+no rule mentions these, 2026-05-04 to 2026-05-06
+
+working directories — a rule on the directory above them makes them one project
+DIRECTORY            TIME  EVENTS  CALLED NOW
+/home/u/src/scratch  1:06  12      scratch
+
+browser keys — paste one into keys:, or into never: if it serves every project at once
+KEY                           TIME  EVENTS  CALLED NOW
+status.example.net/incidents  0:09  3       payments-api
+wiki.example.com/spaces       0:09  3       payments-api
+tracker.example.com/browse    0:06  3       payments-api
+
+A name in the last column is a guess, not a rule: for a directory it is the last element of the path, which splits one project across the directories inside it and merges unrelated ones that end in the same word; for a browser key it is whatever the block around it was called.
+```
+
+Anything already on `never` — a key or a directory — does not appear: a
+decision was made about it. That is what makes both lists shrink as the
+dictionary is written, and what makes this the answer to "which line should I
+add next".
+
+`TIME` is how much of the day happened around each one — the stretch that
+begins with each of its traces. It answers "is this worth a line", and it is
+**not** a figure from the report: it is charged to whatever was on screen at
+the time rather than to the project the minutes counted for, so these numbers
+do not add up to anything printed elsewhere.
+
+Both examples are the same invented three days, run through a dictionary that
+names one project and reads issue keys out of page titles. The shape is what
+`spoor` prints; the hosts, the directory and the ticket are made up.
 
 ### What the numbers mean
 
@@ -354,8 +443,8 @@ yours differs.
 ## The config file
 
 There is no config file until you make one, and `spoor` never writes it. It
-holds two sections today — the browser source, and the thresholds the report
-is built on:
+holds three sections today — the browser source, the thresholds the report is
+built on, and the dictionary that says which project something belongs to:
 
 ```yaml
 # ~/.config/spoor/config.yaml
@@ -381,6 +470,26 @@ report:
   tail: 2m
   # Add the agent's own time to the totals. Off by default.
   count_background: false
+
+attribution:
+  # Traces that must name no project: a host that serves all of them, a
+  # directory you have decided says nothing.
+  never:
+    keys:  [www.example.com]
+    paths: [~/scratch]
+  # One line for every ticket there will ever be: no name, so whatever the
+  # capture group matches becomes the subject.
+  subjects:
+    - titles: '\b([A-Z]+-\d+)\b'
+  projects:
+    - name: payments-api
+      work: true
+      # The directory and everything under it.
+      paths: ~/src/payments-api
+      # host[:port][/first-segment], as the report prints it.
+      keys: git.example.com
+      # A regular expression over the page title.
+      titles: 'payments-api'
 ```
 
 Every key under `report` is also a flag on `spoor report` — `--gap`,
@@ -398,6 +507,237 @@ writing zero, and there would then be no way left to ask for the default. For
 `head` and `tail`, `0s` means zero — "add no time I cannot see" has to be
 sayable, and it is the whole point of having them configurable. The flags
 behave the same way as the keys.
+
+### Naming projects
+
+Without this section a project is the last element of the working directory a
+Claude Code session ran in, and a browser visit has no project at all. That
+guess is wrong in both directions at once: it splits one project across the
+directories inside it — a checkout and its `docs` are two projects, and a
+single chat window changes its own directory the moment a shell command does —
+and it merges unrelated checkouts that both end in `src`.
+
+The dictionary replaces it. Each entry is a name and the rules that give an
+event that name:
+
+| Key | Matches | Against |
+|---|---|---|
+| `paths` | a directory and everything under it; `~` for home, a trailing `*` for a plain prefix | the working directory of a Claude Code event |
+| `keys` | `host[:port][/first-segment]` | a browser visit |
+| `branches` | a regular expression | the git branch |
+| `titles` | a regular expression | the page title |
+
+Any one of them matching is enough. Each takes a list, and a list of one may
+be written as a plain value — `paths: ~/src/thing`.
+
+**A directory rule covers what is under it**, so one line takes a checkout,
+its subdirectories and the worktrees inside it. `/src/thing` does not cover
+`/src/thing-other`: the comparison ends at a separator, which is the whole
+point. A trailing `*` makes it a plain prefix instead — `paths: /tmp/thing-*`
+— which is what the temporary worktrees an agent creates need, since each has
+a random suffix and none of them is under a shared directory.
+
+**A key is written the way `report --unmatched` prints it** — that command's
+`KEY` column is a key and nothing else, so a line of it can be pasted in
+unchanged. The same value appears inside the `ON WHAT GROUNDS` column of the
+day report, with a visit count after it; the count is not part of the key.
+
+A bare host covers its subdomains and every first segment of it. Written out,
+a port and a segment must both be the ones written: `localhost:3000` and
+`localhost:5173` are two dev servers and stay two, and `example.com/issues`
+matches only that first segment. An address is matched exactly and has no
+subdomains, so `[::1]:3000` and `192.0.2.10` mean themselves and nothing
+under them.
+
+**Quote a key that starts with a bracket**: `- '[::1]:3000'`. Unquoted, `[`
+starts a list in YAML and the whole run stops with a parser error — the same
+trap as the `ignore` list further down, and the same fix.
+
+**The more specific rule wins, whatever order they are written in.** A longer
+path beats a shorter one and a longer key beats a shorter one, so
+`app.example.com/salary` can belong to one project while the rest of
+`app.example.com` belongs to another. A literal beats a regular expression:
+where something happened is better evidence than what a piece of text looked
+like. Between two expressions there is nothing to compare, so the order they
+are written in decides, always the same way.
+
+**`fallback`** says what happens to a Claude Code event no rule names:
+`cwd-basename`, the default, keeps the guess so that adding a first rule
+cannot take a name away from an event that had one; `none` leaves it unnamed,
+to be named by the block around it or not at all.
+
+**`work: true`** marks a project as work rather than personal. Leaving it out
+says nothing, which is not the same as personal — on the data this was
+measured against, personal projects carried more than twice the hours of work
+ones, so a tool that assumed either way would be wrong about most of the day.
+It appears as `work` in `--json` and is not otherwise summed anywhere yet.
+
+**`never`** lists traces that must not name a project — browser keys under
+`keys`, directories under `paths`:
+
+```yaml
+attribution:
+  never:
+    keys:  [www.example.com, wiki.example.com/search]
+    paths: [~/scratch, ~/tmp-notes]
+```
+
+A bare list is read as `keys`, which is what this section was before `paths`
+existed.
+
+A search engine, a wiki root or an issue tracker's home page serves every
+project at once — one such key was a sixth of all browsing on the data this was
+written against — and for those the right answer is no project rather than the
+wrong project. What the time was about is decided by the block around it, which
+is where the evidence actually is.
+
+**A dev server can go either way, and only your own data says which.** The port
+is stored precisely because it tells one server from another — without it every
+`localhost` is one key. Whether that server is one project is a separate
+question: a port you always run the same thing on is a `keys` entry for that
+project, and a port you reuse for whatever you are working on today belongs
+under `never`, because the block around it knows and the port does not.
+
+**A directory needs this more than a host does.** A host with no rule is simply
+unnamed; a directory with no rule is named by the last element of its path,
+which is a guess nobody wrote down. The only other way to refuse that guess is
+`fallback: none`, which turns it off everywhere at once — so a directory you
+have never seen before stops appearing as a row and quietly joins its
+neighbours instead. A path here is how you decide about one directory and keep
+the guess working for the rest.
+
+Three things follow, and each is there for a reason:
+
+- **it takes the trace away, not the event.** A rule reading the page **title**
+  or the **branch** still applies. That is what makes an issue tracker work
+  here without an API: the host says only "the tracker", while the title says
+  which board or which repository;
+- **a path here beats the guess**, or the last element of the path would name
+  what the entry just refused;
+- **a path here names one directory, not the tree under it** — unlike a path
+  under a project, which names the tree. Silencing is a statement about the
+  directory you looked at, and `report --unmatched` prints your home directory
+  as a candidate: a subtree would take one paste to switch discovery off for
+  the whole machine.
+
+  For the tree, add a second entry: `[~/scratch, ~/scratch/*]`. A trailing `*`
+  is a plain string prefix, exactly as it is under a project — `~/scratch*` on
+  its own would take `~/scratchpad` and `~/scratch-notes` with it, and say
+  nothing about having done so;
+- **it loses to a more specific rule of its own kind.** `never` on `/home/you`
+  does not take away a rule on the one checkout inside it, and a bare host
+  under `never` does not take away `keys: docs.that-host`. Conversely a
+  narrower `never` carves a segment out of a broader rule — `never` on
+  `wiki.example.com/search` under a project that owns `wiki.example.com`.
+
+Everyday use, beyond refusing: a key or a path nobody has written a rule for is
+unnamed anyway, so putting it here says so **on purpose**, which is what takes
+it out of `report --unmatched`.
+
+A rule that can never match anything — a key written as a URL, a path that is
+not absolute, a project with no name, an expression left empty, or a rule a
+`never` entry covers just as specifically — is a warning on stderr, not a
+failed run. The last of those is the one worth reading: the others are typos in
+a single line, while that one says two lines that are each correct have
+cancelled each other out. One unusable line is not a reason to refuse to
+report, and a line that silently does nothing is the failure this is here to
+prevent. It goes to stderr rather than into the output because `--json` has to
+stay a document a program can read.
+
+### Subjects
+
+A subject is the second level and the last: something inside a project that
+spans weeks — episode 14, level 3, one feature, one ticket. There is no third
+level, on purpose. A tree of any depth would need every report to say which
+depth it was answering about, and the question people ask is "how long did
+this one thing take".
+
+A subject is written like a project rule, with a name, inside the project it
+belongs to:
+
+```yaml
+attribution:
+  projects:
+    - name: payments-api
+      paths: ~/src/payments-api
+      subjects:
+        - name: refunds
+          branches: '^refunds/'
+```
+
+With **no name**, the first capture group of whichever expression matched
+becomes the subject. That is the line worth having:
+
+```yaml
+attribution:
+  subjects:
+    - titles: '\b([A-Z]+-\d+)\b'
+```
+
+Written at the top of `attribution` it applies inside every project, and it
+gives every ticket a subject of its own without listing any of them. This is
+the whole of the issue-tracker support: the key is in a path segment `spoor`
+deliberately never stores, and it is also in the page title, which it does.
+The same expression finds it in a merge request title and in a branch name.
+
+Two things follow from a capture group being what names a subject. Whatever it
+matches is printed, so an expression that captured half a page title would put
+half a page title on screen — `([A-Z]+-\d+)` captures a key and not the query
+around it. And a subject with no name and no capture group cannot call itself
+anything, so it is refused with a warning rather than quietly producing empty
+ones.
+
+**A subject never inherits.** A project can take its name from the block
+around it; a subject cannot. A ticket number in a page title says that page
+was about that ticket and says nothing about the hour that followed — so a
+subject holds the stretch of the day around its own traces, and no more. The
+subjects of a project therefore do not add up to the project: most of a
+project's time belongs to no subject in particular.
+
+#### A subject reaches as far as your touches do
+
+Time inside a block belongs to the nearest **human touch** — a prompt you
+typed, a page your browser recorded — not to the nearest event. A subject is
+taken from that same touch, so a rule pointed somewhere your touches do not
+reach collects traces and little or no time.
+
+Two shapes, and they differ:
+
+- **the events share a block with touches that are somewhere else** — you
+  prompt from the parent directory while the agent works in the child. The
+  stretch goes to the touch, so a subject rule on the child gets no time at
+  all;
+- **the events are a block of their own, with no touch in it** — a session
+  resumed with its prompt in an earlier block. Then each event keeps its own
+  name and the time is counted, as background: the agent working alone.
+
+Measured on the data this was written against, all of these are real:
+
+| A rule on | What it had | What it got |
+|---|---|---|
+| The hosts of dashboards and logs | your visits | hours, and a category that had been hiding inside others |
+| A directory you prompt in | your prompts | hours |
+| An issue key in a page title | a card open for a minute | 3.5% of the time that issue was worked on |
+| A directory only the agent works in, prompted from its parent | 2983 events, no prompt of yours in the block | no time as a subject |
+| Repositories inside one folder | no working directory of their own | nothing to tell apart |
+
+None of that is fixable with more rules, and it is worth knowing before writing
+any. What fixes it is leaving a trace:
+
+- **use the same name everywhere** — the folder you open, the branch you cut,
+  the ticket you file, the chat you start. One name, and one line of the
+  dictionary finds all four;
+- **give a piece of work its own directory** when you want its time counted
+  separately, and prompt from inside it;
+- **branch per ticket** if you want time per ticket. Every Claude Code event
+  inside a git checkout carries its branch, so `branches: '\b([A-Z]+-\d+)\b'`
+  starts working the day you do — and works backwards over everything already
+  imported, because rules run when the report is built.
+
+Where you did not, the time is still measured — it just belongs to the project
+rather than to anything below it. Naming that by hand is what the terminal
+interface is for, and it is a much smaller job than remembering when it
+happened.
 
 ### Ignoring domains
 
@@ -730,15 +1070,34 @@ spoor report --day
 `attention` is never larger than `active`, and `active` is never larger than
 the span it is quoted against — those are what the arithmetic guarantees. What
 it cannot guarantee is that the projects are yours: `(no project)` is time
-nothing could name, and a project appearing twice under two names is
-`basename(cwd)` doing what it does until the dictionary arrives.
+nothing could name, and a project appearing twice under two names is the
+working-directory guess doing what it does until you write a rule.
 
 If a project shows `agent` time and no time of yours at all — neither
 attention nor background — the report names it in a paragraph under the
 summary. Nothing starts an agent but a person, so that combination means
 either something ran unattended or — far more often — one chat window is being
 counted under two names, because a shell command that changes directory
-changes what the session calls itself.
+changes what the session calls itself. One `paths` rule on the directory above
+both names is the fix, and the next step is how to find it.
+
+**10. Write the first line of the dictionary.**
+
+```
+spoor report --unmatched
+```
+
+Every directory in the first list is a project the tool is naming by
+guesswork. The one at the top costs the most time, so it is the line worth
+writing first — and once it is written, it leaves the list. A directory that
+turns out to mean nothing goes under `never: paths:` instead, which is just as
+much a decision and takes it off the list too. The second list is browser keys,
+with the same two answers: one that belongs to a single project goes under
+`keys`, one that serves all of them under `never: keys:`.
+
+Do the same a week later and the list will have changed. That is the loop —
+the dictionary is not written once, and this is what says what it is still
+missing. [Naming projects](#naming-projects) has the syntax.
 
 ## Uninstall
 

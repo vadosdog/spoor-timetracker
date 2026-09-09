@@ -413,17 +413,18 @@ func TestEventsBetweenBounds(t *testing.T) {
 	}
 }
 
-// The page title is the one column that can hold a search query, and nothing
-// downstream of here has any use for it. Not loading it at all is a second
-// line of defence behind "the renderers do not print it": a value that never
-// arrives cannot be printed by accident, and this is the test that notices if
-// somebody puts it back.
-func TestEventsBetweenDoesNotLoadTitles(t *testing.T) {
+// The title is loaded, and it is the one column that had to be argued into
+// this query: it is what an attribution rule reads to find an issue key, and
+// also the most revealing thing in the database. Loading it is deliberate, and
+// what keeps it from being printed is a test in the report package rather than
+// this absence — see TestNeitherRendererPrintsATitleOrALabel there, which
+// checks every view in both formats.
+func TestEventsBetweenLoadsTitles(t *testing.T) {
 	st := open(t)
+	const title = "SPOOR-1 make the report say what it means"
 	if _, err := st.InsertEvents([]event.Event{{
 		Source: "browser", ExternalID: "v1", TS: "2026-05-04T09:00:00.000Z",
-		Type: "visit", Host: "search.test", PathHead: "q",
-		Title: "a search query nobody downstream should receive",
+		Type: "visit", Host: "tracker.test", PathHead: "browse", Title: title,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -436,16 +437,7 @@ func TestEventsBetweenDoesNotLoadTitles(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d events, want 1", len(got))
 	}
-	if got[0].Title != "" {
-		t.Errorf("EventsBetween loaded the title %q", got[0].Title)
-	}
-	// And the row itself still has it: this is about what is read, not about
-	// what is kept.
-	var stored string
-	if err := st.DB().QueryRow(`SELECT title FROM events WHERE external_id = 'v1'`).Scan(&stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored == "" {
-		t.Error("the title was not stored at all; this test would pass for the wrong reason")
+	if got[0].Title != title {
+		t.Errorf("Title = %q, want %q", got[0].Title, title)
 	}
 }
