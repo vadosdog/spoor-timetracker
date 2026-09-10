@@ -4,10 +4,14 @@ Reconstructs the working day after the fact, from traces already on your disk.
 Nothing to start, nothing to stop, nothing running in the background — and the
 screen is never captured.
 
-Today it reads two sources: the session logs Claude Code writes under
-`~/.claude/projects`, and browsing history — of which only Google Chrome is
-verified; see [Requirements](#requirements). With neither installed there is
-nothing for it to read.
+Today it reads three sources: the session logs Claude Code writes under
+`~/.claude/projects`, browsing history — of which only Google Chrome is
+verified; see [Requirements](#requirements) — and, if you switch it on, a
+calendar. With none of them there is nothing for it to read.
+
+The calendar is the one source that leaves your machine, and it is off until
+you turn it on. [Network](#network) says exactly what it does and what it
+costs you; read that section before the install instructions, not after.
 
 Those session logs are written by anything with a working directory — the CLI,
 the editor extension, a Cowork session in the desktop app. A conversation in
@@ -20,7 +24,7 @@ There are no guarantees, no support and no promises about the next version.**
 
 ## Status
 
-Early. `spoor` imports those two sources into SQLite and reports what a day or
+Early. `spoor` imports those sources into SQLite and reports what a day or
 a week went on: projects, hours, and the evidence for each. Which project
 something belongs to is decided by a dictionary you write in the config file:
 directory paths, browser keys, git branches and page titles. Below a project
@@ -42,14 +46,15 @@ where it now is.
 
 **Next**
 
-- **The calendar**, as a source. Meetings are the one gap no local trace can
-  fill — nothing happens on disk during a call — so a day with meetings reads
-  as empty where it was busy. A local `.ics` file first; fetching one from a
-  private URL stays an explicit, off-by-default flag, because this tool makes
-  no network call unless it is asked to.
 - **Confirming the day.** A terminal interface: walk the blocks, name what the
   rules could not, and have that answer stored as a rule, so the same question
   is not asked twice. Everything it does stays available as flags.
+
+**Done since this list was written**
+
+- **The calendar**, as a source. It reads a private iCalendar feed, or a
+  downloaded `.ics`, and turns meetings into intervals of the day. The network
+  call is explicit and off by default: see [Network](#network).
 
 **Later**
 
@@ -69,13 +74,17 @@ ever need writing *back*, which is a different thing entirely.
 
 ## What it never does
 
-- **No network.** The tool never opens a network connection. Not for updates,
-  not for telemetry, not at all. If that ever changes, it will be off by
-  default and this section will say so, above the install instructions.
+- **No network unless you ask for it.** Nothing here phones home: no updates,
+  no telemetry, no analytics, ever. There is exactly one outbound request the
+  tool can make, and only after you write two settings and put a URL in a file
+  yourself — fetching your own calendar feed. Out of the box it makes none.
+  [Network](#network) is the whole story, and `spoor ingest --no-calendar`
+  turns it off regardless of what any config file says.
 - **Metadata only.** Times, paths, branches, model names, tool names, the
-  identifiers Claude Code puts on its own sessions and lines, and the address
-  fields described in the next point. The text of your conversations, of tool
-  results and of attachments is never stored — a boundary of the project, not
+  identifiers Claude Code puts on its own sessions and lines, a meeting's
+  title and how long it ran, and the address fields described in the next
+  point. The text of your conversations, of tool results and of attachments
+  is never stored — a boundary of the project, not
   a setting. Step 6 below shows you every column there is, so you can check
   that instead of trusting this paragraph.
 - **No URLs.** From your browsing history `spoor` keeps the host, the port,
@@ -96,12 +105,141 @@ ever need writing *back*, which is a different thing entirely.
 - **No cgo.** SQLite is `modernc.org/sqlite`, so one static binary
   cross-compiles anywhere.
 
+## Network
+
+Meetings are the one hole no local trace can fill. Nothing is written to your
+disk while you sit in a call, so a day full of them reads as a day of doing
+nothing. The calendar source closes that hole, and it is the only part of
+`spoor` that opens a socket.
+
+**It is off.** With no config file, or with a config file that does not
+mention a calendar, `spoor` makes no outbound request of any kind. Turning it
+on takes three deliberate steps: setting `calendar.enabled: true`, listing a
+calendar, and writing that calendar's address into a file by hand. Miss any
+one and nothing goes out.
+
+To turn it off again for a single run, whatever the config says:
+
+```
+spoor ingest --no-calendar
+```
+
+### What is sent, and to whom
+
+One HTTPS GET per calendar, to the address you put in the file, each time
+`ingest` runs — plus up to two more if that server answers with a redirect.
+Nothing is uploaded, and nothing goes anywhere except the address you
+configured and whatever it redirects to; the `Referer` header is stripped on
+the way, so the address itself is never handed on. If you point it at a file on
+disk instead — `file:` rather than `url_file:` — nothing is sent at all, and
+the source works exactly the same.
+
+### Treat the URL as a password
+
+A private iCalendar address is a bearer credential. Anyone holding it can read
+your whole calendar — every title, description, attendee, location and
+conference link — without logging in as anybody. It does not expire, it cannot
+be narrowed, and the only way to revoke it is to reset it, which breaks every
+other subscription to that calendar at the same time.
+
+So `spoor` keeps it the way `ssh` keeps a key: on its own, in its own file,
+never in the config.
+
+```
+~/.config/spoor/
+  config.yaml       ← shown in issues, committed to dotfiles. No secrets here.
+  calendars/work    ← the URL, one line, mode 0600
+```
+
+One command creates it, with the right permissions, reading the URL without
+showing it:
+
+```
+spoor add-calendar work
+```
+
+It asks you to paste the URL, writes it to `~/.config/spoor/calendars/work`
+with mode 0600, and prints the config lines to add. It does not edit your
+config file — `spoor` has never written that file and is not going to start.
+
+There is deliberately **no flag** for the URL, and `add-calendar` will not take
+it as an argument either. On Linux `/proc/<pid>/cmdline` is world-readable by
+default, so anything on a command line is visible to every other account on the
+machine and lands in your shell history besides.
+
+`spoor` never prints the secret part of the URL. That is deliberate work
+rather than a default: Go's own error text embeds the whole URL, so one flaky
+connection would otherwise put your credential into a terminal, a screenshot
+or a pasted issue. Network errors are reported by cause instead — "connection
+refused", "certificate has expired" — with the path removed. Redirects are
+followed with the `Referer` header stripped, for the same reason: it would
+hand the address to the next host.
+
+The host is not removed, because "no such host" is worth reading and naming the
+server is how you know which one failed. For a hosted calendar the secret is
+entirely in the path, so that costs nothing; if your feed is self-hosted, the
+host names your server.
+
+If the URL does leak, reset it in your calendar's own settings. In Google
+Calendar that is *Settings → the calendar → Integrate calendar → Reset*.
+
+### What it stores
+
+Start, end and title. That is all.
+
+Attendees are read in exactly one place — to work out whether *you* declined an
+invitation — and are never written anywhere. The description, the location, the
+organiser and the conference link are not read at all. Other people's names and
+addresses are not yours to collect, and this project stores metadata only.
+
+The title is kept, and it is the field to think about: a meeting called
+"1:1 with Sam" puts Sam's name in your database. It is the same trade as page
+titles from your browser, and it has the same control — leave the calendar out,
+or point it at a calendar you are happy to have on disk.
+
+### What it skips, and why you should look at the count
+
+`ingest` prints a line saying what it threw away:
+
+```
+  skipped: 3 cancelled, 12 all-day, 1 marked free, 2 declined, 0 with no length, 0 longer than a day, 0 not expanded, 0 unreadable
+```
+
+Cancelled meetings, meetings you declined, and anything the calendar itself
+marks as "free" are not time you spent. All-day entries — holidays, birthdays,
+"on leave" — are skipped too, because importing one as a twenty-four hour block
+would swallow the whole day, and so is any timed entry running longer than a
+day, which is a label on a stretch of dates rather than an hour you sat
+through. If that count looks too big, that is the number telling you so.
+
+A timed entry with no length at all is a reminder rather than an interval, and
+is skipped for that reason.
+
+The last two are different from the rest, and from each other. `not expanded`
+is a repeating meeting whose repetition rule this version will not guess at:
+the entry is fine, the whole series is simply absent. `unreadable` is an entry
+this parser could not use at all — a date it cannot read, a missing or absurd
+identifier, a rule that would remove occurrences. Either way that entry costs
+only itself, the rest of the feed is still imported, and the reason is printed
+on a `warning:` line beside the counts.
+
+A feed that cannot be read at all — the download stopped early, the server
+sent a login page instead, the address was reset — is refused whole rather than
+half-imported. It shows up as `1 calendars (0 read)` with a `warning:` line
+saying which calendar and why. The run still finishes and the other sources
+still import; that calendar simply contributed nothing, and `(0 read)` is the
+signal to look for.
+
+Repeating meetings are expanded into the individual occurrences, so a weekly
+sync is fifty-two entries in a year rather than one.
+
 ## Requirements
 
 - **Go 1.25 or newer**, to build. Nothing is needed at runtime: the binary is
   self-contained.
 - **At least one source.** Claude Code, with session logs in
-  `~/.claude/projects`; or a browser — see below. Any source that is not
+  `~/.claude/projects`; or a browser — see below; or a calendar, which is
+  off until you turn it on. See [Network](#network). Any source that is not
   there is skipped without complaint.
 - **`python3` or the `sqlite3` client** — optional, and only for looking
   inside the database: the inspection step of the check below, and the queries
@@ -139,22 +277,27 @@ this file assumes `spoor` is runnable by name.
 
 ```
 spoor ingest [--db PATH] [--config PATH] [--claude-dir PATH]
-             [--browser-history PATH] [--no-claude-code] [--no-browser] [--quiet]
+             [--browser-history PATH] [--no-claude-code] [--no-browser]
+             [--no-calendar] [--calendar-back 9600h] [--calendar-forward 744h]
+             [--quiet]
 spoor report [--day[=YYYY-MM-DD] | --week[=YYYY-MM-DD]] [--json | --table]
              [--timeline] [--subject NAME] [--unmatched]
              [--min 5m] [--gap 10m] [--attention-window 5m]
              [--head 2m] [--tail 2m] [--count-background]
              [--db PATH] [--config PATH]
 spoor count  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--source NAME] [--db PATH]
+spoor add-calendar <id>
 spoor version
 ```
 
 `spoor <command> -h` prints the flags of that command.
 
 **`ingest`** imports what is new and leaves the rest alone: importing the same
-data twice changes nothing. Run it regularly — the sources erase themselves,
-and only what has been imported survives that. See
-[Uninstall](#uninstall) for how long each one keeps.
+data twice changes nothing. Run it regularly — the two local sources erase
+themselves, and only what has been imported survives that. See
+[Uninstall](#uninstall) for how long each one keeps. A calendar feed does not
+erase itself, but it goes stale in a different way: a meeting that was moved
+after it was imported keeps its old time, because nothing deletes rows.
 
 `--browser-history` names a history database to read *instead of* searching
 the usual places, and may be given more than once. It also replaces the
@@ -321,8 +464,9 @@ names one project and reads issue keys out of page titles. The shape is what
 
 **Blocks.** Events no further apart than `--gap` — ten minutes by default —
 are one block of work. A pause of exactly the threshold is still one
-block; one second more is two. The pauses *between* blocks are not counted at all: `spoor`
-does not decide whether your lunch was work, so it does not quietly bill it.
+block; one second more is two. The pauses *between* blocks are not counted at
+all: `spoor` does not decide whether your lunch was work, so it does not
+quietly bill it.
 
 A block reaches a little past its own events at both ends, because writing a
 prompt and reading the last answer are real time that leaves no trace:
@@ -403,8 +547,19 @@ under them at all, only somebody's belief about their own habits. Moving any
 of them moves the headline number a long way — try `--gap 15m` and see.
 
 **`count`** defaults to the last seven days, ending today. `--source` takes
-`claude-code` or `browser`. Days are local days: timestamps are stored in UTC,
-and the local day boundaries you give it are converted to UTC when querying.
+`claude-code`, `browser` or `calendar`. Days are local days: timestamps are
+stored in UTC, and the local day boundaries you give it are converted to UTC
+when querying.
+
+A meeting is the exception to all of this, and the only one. Every other source
+records a moment, and the day is made of the stretches between those moments; a
+meeting carries its own length, because nothing is written to disk while you sit
+in one. So an hour in a call is an hour of **attention** rather than a point
+casting a window, it names the seconds it covers the way a typed prompt does,
+and a block holding a meeting runs at least to the end of it. A meeting that
+would run past midnight is cut there: a day holds at most a day. Anything
+longer than a day is not imported at all — see what it skips, under
+[Network](#network).
 
 **`version`** prints `dev` unless the binary was built with `just build`, which
 stamps the version from git.
@@ -417,6 +572,7 @@ Everything follows the XDG base directory spec:
 |---|---|---|
 | Database | `~/.local/share/spoor/spoor.db` | `SPOOR_DB`, `XDG_DATA_HOME` |
 | Config, optional — nothing writes it | `~/.config/spoor/config.yaml` | `--config`, `SPOOR_CONFIG`, `XDG_CONFIG_HOME` |
+| Calendar URLs, written by `add-calendar` | `~/.config/spoor/calendars/<id>` | `url_file:`, `XDG_CONFIG_HOME` |
 | Claude Code logs, never written to | `~/.claude/projects/` | `--claude-dir`, or `CLAUDE_CONFIG_DIR` (read as `$CLAUDE_CONFIG_DIR/projects`) |
 | Chrome profiles, copied not opened | `~/.config/google-chrome/*/History` | `--browser-history` |
 | Firefox profiles, copied not opened | `~/.mozilla/firefox/*/places.sqlite` | `--browser-history` |
@@ -443,8 +599,9 @@ yours differs.
 ## The config file
 
 There is no config file until you make one, and `spoor` never writes it. It
-holds three sections today — the browser source, the thresholds the report is
-built on, and the dictionary that says which project something belongs to:
+holds four sections today — the browser source, the calendar source, the
+thresholds the report is built on, and the dictionary that says which project
+something belongs to:
 
 ```yaml
 # ~/.config/spoor/config.yaml
@@ -457,6 +614,28 @@ browser:
     # a restored backup. Another browser's file can be named here too, with
     # the caveat under Requirements: untried, and not supported.
     - /mnt/backup/google-chrome/Profile 1/History
+
+calendar:
+  # The network switch. False, or absent, and no calendar is fetched — a
+  # "file:" source below still works, because it goes nowhere.
+  # See Network, above the install instructions.
+  enabled: false
+  sources:
+    - id: work
+      # Where the URL is. Left out, it is ~/.config/spoor/calendars/<id>,
+      # which is what `spoor add-calendar` writes.
+      # The URL itself never goes in this file: this is the file you paste
+      # into an issue, and it reads your whole calendar.
+      url_file: ~/.config/spoor/calendars/work
+      # Your own addresses, so that a meeting you declined can be told from
+      # one somebody else declined. The feed says which attendee said no; it
+      # does not say which attendee is you. Left out, nothing is skipped on
+      # that ground. These are read and never stored.
+      me: you@example.com
+    - id: team
+      # A downloaded .ics instead. Needs no network and no switch above, and
+      # goes stale silently — it is only as fresh as your last download.
+      file: ~/Downloads/team.ics
 
 report:
   # Pauses shorter than this are the same block of work.
@@ -525,7 +704,7 @@ event that name:
 | `paths` | a directory and everything under it; `~` for home, a trailing `*` for a plain prefix | the working directory of a Claude Code event |
 | `keys` | `host[:port][/first-segment]` | a browser visit |
 | `branches` | a regular expression | the git branch |
-| `titles` | a regular expression | the page title |
+| `titles` | a regular expression | the page title, or a meeting's summary |
 
 Any one of them matching is enough. Each takes a list, and a list of one may
 be written as a plain value — `paths: ~/src/thing`.
@@ -838,7 +1017,8 @@ spoor version
 spoor ingest
 ```
 
-Expect two lines per source it found, then the total — five lines with both
+Expect two lines per source, three for a calendar that skipped something it
+found, then the total — five lines with both
 Claude Code and a browser installed, in this shape:
 
 ```
@@ -851,8 +1031,9 @@ database: 22800 events total
 
 The numbers above are made up; yours will be your own. A month of session
 logs and 90 days of browsing take a second or two together. Extra lines
-appear only when something was unreadable, and **a source that found nothing
-to read is not mentioned at all** — with only one of the two installed you get
+appear only when a source dropped something — an unreadable line, or a meeting
+the calendar skipped — and **a source that found nothing
+to read is not mentioned at all** — with only one of those two installed you get
 three lines, not five, and that is not a fault.
 
 **3. The second import, straight after — this is the important one.**
@@ -999,6 +1180,12 @@ no rule can tell a work search from a private one. That is what
 domains you would rather not have; there is no wrong answer, and the ones you
 do not want should have been on the list before the first import.
 
+Meeting summaries are in the same column and the same list, with an empty
+`host`: a meeting has no domain, so the ignore list cannot reach it. A meeting
+called "1:1 with Sam" puts Sam's name here, and the controls for that are the
+ones under [Network](#network) — leave the calendar out, or point it at a
+calendar you are happy to have on disk.
+
 **7. An event outlives the file it came from.**
 
 This check runs on a copy of one session, in a temporary directory: your real
@@ -1008,9 +1195,9 @@ logs and your real database are never touched.
 SPOOR_TMP=$(mktemp -d) && mkdir -p "$SPOOR_TMP/p" && (
   set -e
   cp "$(find ~/.claude/projects -name '*.jsonl' | head -1)" "$SPOOR_TMP/p/"
-  spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p" --no-browser --quiet
+  spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p" --no-browser --no-calendar --quiet
   rm "$SPOOR_TMP/p"/*.jsonl
-  spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p" --no-browser
+  spoor ingest --db "$SPOOR_TMP/db" --claude-dir "$SPOOR_TMP/p" --no-browser --no-calendar
 ); [ -n "$SPOOR_TMP" ] && rm -rf "$SPOOR_TMP"
 ```
 
@@ -1019,9 +1206,10 @@ files, so per step 2 it says nothing at all — and that line is the same
 non-zero `database: N events total` as the first import. The source file is
 gone; the events are not.
 
-`--no-browser` is not decoration: without it this throwaway database would
-fill up with your real browsing history, which is not what a five-second
-check should do.
+`--no-browser` and `--no-calendar` are not decoration. Without the first, this
+throwaway database fills up with your real browsing history; without the
+second, a check about local files goes to the network — which is exactly what
+this README spends a section promising happens only when you ask for it.
 
 The cleanup sits outside the `&&` chain on purpose: the copy is a real
 transcript, and it has to go whether the check passed or not.
@@ -1101,8 +1289,10 @@ missing. [Naming projects](#naming-projects) has the syntax.
 
 ## Uninstall
 
-`spoor` writes to one directory and nowhere else. It installs no service, no
-timer and no shell hook, so removing it is removing files.
+`spoor` leaves files in two directories and nowhere else — the copy it makes
+of a browser history goes to a temporary directory and is deleted again. It
+installs no service, no timer and no shell hook, so removing it is removing
+files.
 
 **Before you do: the database is the only copy.** Claude Code deletes its own
 session logs after 30 days by default and Chrome keeps 90 days of history, so
@@ -1112,6 +1302,7 @@ matters to you, `spoor.db` belongs in whatever backup you already run.
 
 ```
 rm -rf ~/.local/share/spoor    # the database and its -wal / -shm files
+rm -rf ~/.config/spoor         # config.yaml, and calendars/ if you used add-calendar
 rm -f  ~/.local/bin/spoor      # the binary, wherever you put it
 ```
 
@@ -1120,7 +1311,11 @@ real path with the `echo` above before deleting anything. A custom `SPOOR_DB`
 names the file rather than a directory, so remove its `-wal` and `-shm`
 siblings alongside it.
 
-Nothing creates `~/.config/spoor`; if you made one by hand, remove that too.
+`spoor add-calendar` is the one thing that writes under `~/.config/spoor`, and
+what it writes is a calendar URL — a bearer credential that reads your whole
+calendar and does not expire. Remove that directory even if you are only
+reinstalling, and if you are giving the machine away, reset the address in your
+calendar's own settings as well.
 
 To wipe the collected data but keep using the tool, delete only the database.
 The next `spoor ingest` rebuilds it from whatever the sources have not erased

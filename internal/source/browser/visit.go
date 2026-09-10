@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/vadosdog/spoor-timetracker/internal/event"
+	"github.com/vadosdog/spoor-timetracker/internal/text"
 )
 
 // SourceName is what ingested events are tagged with. Chrome and Firefox are
@@ -111,7 +112,7 @@ func toEvent(v visit, flavour, profile string, ignore Ignore) (event.Event, Outc
 		Host:       host,
 		Port:       port(u),
 		PathHead:   pathHead(u.Path),
-		Title:      printable(strings.TrimSpace(v.Title)),
+		Title:      text.Printable(strings.TrimSpace(v.Title)),
 	}, Kept
 }
 
@@ -141,7 +142,7 @@ func port(u *url.URL) string {
 func externalID(flavour, profile string, t time.Time, id int64) string {
 	return strings.Join([]string{
 		flavour,
-		sanitise(profile, replacement),
+		text.Sanitise(profile, text.Replacement),
 		t.UTC().Format("2006-01-02T15:04:05.000000Z"),
 		strconv.FormatInt(id, 10),
 	}, "/")
@@ -163,7 +164,7 @@ func externalID(flavour, profile string, t time.Time, id int64) string {
 // the same call. What that call changed about an entry is reported separately,
 // by NewIgnore, before it gets here.
 func canonicalHost(host string) string {
-	host = strings.TrimSuffix(strings.ToLower(sanitise(host, replacement)), ".")
+	host = strings.TrimSuffix(strings.ToLower(text.Sanitise(host, text.Replacement)), ".")
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.String()
 	}
@@ -238,7 +239,7 @@ func pathHead(path string) string {
 	// A first path segment is a name — an owner, a group, a section. One
 	// longer than 64 characters is not, and the database is meant to be read
 	// by eye.
-	return truncate(seg, maxPathHead)
+	return text.Truncate(seg, maxPathHead)
 }
 
 // nameRune reports whether a rune may stay in a path segment.
@@ -294,90 +295,7 @@ const (
 	// any length, and an unbounded value out of somebody else's database has
 	// no business in a column a person is expected to read.
 	maxPathHead = 64
-
-	// maxTitle caps the page title, for the same reason and more so: the title
-	// is the one column an arbitrary web page fills in entirely. Chrome already
-	// stores at most this many characters, so on real data nothing is lost.
-	maxTitle = 4096
 )
-
-func truncate(s string, n int) string {
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n])
-}
-
-// replacement stands in for anything taken out of a value that is an
-// identifier rather than prose — a host, a profile name. A space would be
-// wrong in those, and U+FFFD is the honest signal that something was removed.
-// A title gets a space instead, because a title is prose and two words split
-// by a newline must not become one word.
-const replacement = '\uFFFD'
-
-// sanitise makes a string safe to store and safe to read back: bytes that are
-// not UTF-8 at all are repaired, and runes that would make the text display as
-// something it is not are replaced.
-//
-// Every value carrying bytes from the browser goes through here: the host,
-// the first path segment, the title, and the profile name inside the dedup
-// key. The rest of the text this source writes — type, subtype, entrypoint,
-// port — is a constant of this package or digits, and needs nothing; if that
-// ever stops being true, it joins the list.
-//
-// That is not tidiness, it is the lesson of getting it wrong twice. The first
-// version covered only titles, because strings.Map does the UTF-8 half as a
-// side effect and pathHead did not use strings.Map. The second covered
-// path_head and title and left the host and the dedup key raw. One row SQLite
-// cannot decode makes SELECT fail on that column outright — not a wrong
-// answer, no answer — and the README tells the user to run exactly that
-// SELECT.
-//
-// A path is percent-encoded bytes rather than text, which is how such a row
-// arrives without anybody misbehaving: a site older than UTF-8 encodes its
-// path in the page's own charset, and "/caf%E9/" is Latin-1. A profile name
-// is a directory name, which on Linux is also bytes.
-//
-// The repair loses fidelity, knowingly: ToValidUTF8 collapses a run of
-// invalid bytes into one replacement, so "caf%E9" and "caf%FF%FE%FD" both
-// come back as "caf\uFFFD". Two different values become one. Nothing that
-// could leak is lost, and the alternative is a column that cannot be read.
-func sanitise(s string, with rune) string {
-	return strings.Map(func(r rune) rune {
-		if unsafeInText(r) {
-			return with
-		}
-		return r
-	}, strings.ToValidUTF8(s, string(replacement)))
-}
-
-// printable prepares a page title: prose, so what is taken out becomes a
-// space rather than a replacement character.
-//
-// This is the column the README tells a person to read with their own eyes,
-// and the page chose its own title, so the point is not tidiness. A NUL makes
-// SQLite's length() report a value shorter than it is. A newline turns one row
-// of `sqlite3 -line` into two, and so do U+2028 and U+0085 in most of what
-// renders text. U+202E reverses everything after it, so a title that reads
-// "safe\u202etxt.exe" on screen is not the title that was stored.
-func printable(s string) string {
-	return truncate(sanitise(s, ' '), maxTitle)
-}
-
-// unsafeInText reports whether a rune would misrepresent the text it sits in:
-// the C0 and C1 controls, the line and paragraph separators, and the format
-// characters — which is the category the direction overrides belong to.
-//
-// Runes that are invisible but are letters rather than format controls
-// (U+3164 HANGUL FILLER, U+2800 BRAILLE PATTERN BLANK) are deliberately left
-// alone. They can pad a title; they cannot misrepresent one, and excluding
-// them would mean an allow-list of scripts.
-func unsafeInText(r rune) bool {
-	return unicode.IsControl(r) ||
-		r == '\u2028' || r == '\u2029' ||
-		unicode.Is(unicode.Cf, r)
-}
 
 // Ignore is the domain list from the config, prepared for matching.
 type Ignore struct {
@@ -433,7 +351,7 @@ func NewIgnore(entries []string) (Ignore, []IgnoreProblem) {
 		// used to live in isDomain, and moving the sanitising into
 		// canonicalHost silently turned it into a branch that could never be
 		// taken.
-		altered := sanitise(e, replacement) != e
+		altered := text.Sanitise(e, text.Replacement) != e
 
 		// Canonicalised last, once the entry is down to a bare host: it is the
 		// same call the stored side makes, and running it before the brackets

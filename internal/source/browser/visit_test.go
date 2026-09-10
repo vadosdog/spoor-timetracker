@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/vadosdog/spoor-timetracker/internal/text"
 )
 
 func TestToEventReducesTheURL(t *testing.T) {
@@ -292,7 +294,7 @@ func TestEveryTextFieldIsSafeToStoreAndToReadBack(t *testing.T) {
 			if !utf8.ValidString(v) {
 				t.Errorf("%q: %s = %q, which is not valid UTF-8", bad, name, v)
 			}
-			if i := strings.IndexFunc(v, unsafeInText); i >= 0 {
+			if i := strings.IndexFunc(v, text.Unsafe); i >= 0 {
 				t.Errorf("%q: %s = %q holds a character that misrepresents it", bad, name, v)
 			}
 			if strings.Contains(v, secret) {
@@ -367,8 +369,8 @@ func TestTitleIsBounded(t *testing.T) {
 	if outcome != Kept {
 		t.Fatalf("outcome = %v", outcome)
 	}
-	if len([]rune(ev.Title)) != maxTitle {
-		t.Errorf("title is %d runes, want it capped at %d", len([]rune(ev.Title)), maxTitle)
+	if len([]rune(ev.Title)) != text.MaxTitle {
+		t.Errorf("title is %d runes, want it capped at %d", len([]rune(ev.Title)), text.MaxTitle)
 	}
 }
 

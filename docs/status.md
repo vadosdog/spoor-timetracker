@@ -1009,9 +1009,285 @@ and two events is what that cost here.
   `--subject` has nothing to answer about. The message says so and lists what
   does exist.
 
-## Next: the calendar, then confirming the day
+## Stage 3.5 — the calendar. Done 2026-09-09.
 
-The calendar is the one gap no local trace can fill, and attributing a meeting
-to a project is this stage's dictionary doing the same job on a different
-source. After it, the terminal interface: walk the blocks, name what the rules
-could not, and store the answer as a rule so the question is asked once.
+Meetings are in. The day no longer shows a pause where a call was, and this is
+the first stage in which `spoor` can open a socket at all.
+
+### The measurement
+
+Day coverage over the same fortnight the earlier stages used: **37.3% → 42.9%**,
+active time 99.02 h → 113.76 h. The numbers themselves live outside this
+repository, with the rest of the survey: the database is public, absolute
+counters with dates are not.
+
+Two of those numbers matter more than the headline:
+
+- **The "before" column was recomputed with this binary, calendar switched
+  off, and matched the previous stage's table on all fourteen days to two
+  decimal places.** That is the check that teaching the report about intervals
+  changed nothing for sources that produce points. It is worth re-running the
+  same way after any change to `splitBlocks` or the stretch tiling.
+- **Gap time sitting on top of a meeting: 14.11 h before, 0.00 h after**, on
+  every day that had meetings. That is the stage's acceptance criterion
+  measured literally rather than eyeballed.
+
+`span` did not move on any day, which is the useful negative result: meetings
+fall inside the envelope of the day's other traces, so the calendar filled
+holes rather than stretching the denominator.
+
+### Six expansion bugs, all found by review
+
+Worth naming, because every one of them returned a plausible number rather than
+an error, and every test written before the review happened to start its series
+on a day where the bug did not show. They are locked by
+`TestExpansionCasesFoundByReview`.
+
+- **A period reaches back before DTSTART.** A weekly period is expanded across
+  the whole week its base falls in, and that week begins up to six days
+  earlier — so `FREQ=WEEKLY;BYDAY=MO,WE,FR` starting on a Wednesday invented a
+  meeting on the Monday before the series existed. Worse, the phantom was
+  counted before the window filter, so it consumed one of COUNT's occurrences
+  and a real one fell off the end.
+- **The walk stopped on the period's base.** For the same reason — occurrences
+  can sit before their base — a weekly or yearly series ended one period early
+  at the far edge of the window, silently. `periodFloor` now gives the earliest
+  moment a period could hold, and the walk stops on that.
+- **`BYMONTH` with no day rule expanded to every day of the month.** "Every
+  January" meant thirty-one meetings. The day now comes from DTSTART, which is
+  the same defaulting the no-BY path already did.
+- **A yearly ordinal `BYDAY` was counted per month.** "The first Monday of the
+  year" was the first Monday of all twelve. The ordinal scope is now the year
+  when the rule is yearly and names no months.
+- **The fast-forward charged empty months against COUNT.** A monthly meeting on
+  the 31st ended early, and by how much depended on where the window started —
+  which is exactly what the comment above it promised could not happen. Only
+  the fixed-length frequencies skip ahead now.
+- **A yearly rule on 29 February landed on 1 March** three years in four,
+  because `AddDate` normalises. A date that does not exist has no occurrence.
+
+### A second review pass, and what it found
+
+The first pass found six expansion bugs; the second found one more of exactly
+the same shape, one of a different kind, and a handful of refusals that were
+not being made. Worth
+recording because the pattern is the lesson:
+
+- **`BYMONTHDAY` was applied only in the monthly branch.** RFC 5545 makes it a
+  limit for `DAILY` and below, so `FREQ=DAILY;BYMONTHDAY=15` — "the 15th of
+  each month" — expanded to every day of every month. This is the `BYMONTH`
+  bug of the first pass, one BY-rule along, in the branch that fix did not
+  reach. Forbidden with `WEEKLY`, so that combination is refused instead.
+- **A `DURATION` of 365 days or more was read as no duration at all.** The end
+  was parked as an offset from the zero time and recognised by "is the year 1
+  or earlier"; `P365D` lands in year 2. The event was then filed under a
+  counter that says "with no length", which is not what happened. It has an
+  explicit flag now, and no sentinel.
+- **A feed cut between two events reported success.** The refusal only covered
+  a cut inside a `VEVENT`. A login page served with 200 was likewise
+  indistinguishable from an empty calendar. The envelope must now be present
+  and closed.
+- **A meeting had no upper bound.** One bad `DTEND` made a single event claim
+  every remaining hour of its day as attention. Anything over a day is refused
+  and counted.
+- **`EXRULE`, a second `RRULE` and `RANGE=THISANDFUTURE`** were each silently
+  half-applied. All three now cost the event they are on: it is dropped,
+  counted as unreadable and named in a warning, and the rest of the feed still
+  imports. A nested `BEGIN:VEVENT` used to overwrite the event it opened
+  inside, losing one with no counter and no note; that one refuses the whole
+  feed, because it is the file being wrong rather than one entry in it.
+
+### What is in place
+
+- `internal/source/calendar` — an iCalendar parser, recurrence expansion, and
+  the one network path in the program.
+- `internal/text` — the string repair that used to live inside the browser
+  source. It moved because there has to be exactly one of it, and the calendar
+  is the second source reading bytes somebody else wrote.
+- `spoor add-calendar <id>` — writes the feed URL into its own file with the
+  right permissions, reading it from the terminal without echoing it.
+- `spoor ingest --no-calendar` — the switch that guarantees no network
+  whatever the config says.
+- The report understands intervals; see below, because that was the larger
+  half of the stage.
+
+### A meeting is an interval, and the report was built for points
+
+This is the part to read before changing anything in `internal/report`.
+
+Every other source produces moments in time, and the day is made of the
+stretches *between* them. A meeting carries its own length, and it is the only
+event that does: nothing is written to disk during a call, so without that
+length the hour does not exist at all.
+
+Five things had to change, and each was a real bug rather than a rename:
+
+- **`entry` gained `end`.** It equals `t` for everything but a meeting.
+- **The pause that ends a block is measured from the running maximum end**, not
+  from the previous event's timestamp. Measured from the start, an hour-long
+  call reads as an hour-long pause and cuts the block in half.
+- **A block ends at its greatest end.** A call that was still running when the
+  last page of the block was opened decides where the block stops — and with
+  it the span the coverage number divides by.
+- **`attentionWindows` sorts before merging.** `windows.add` only ever compares
+  against the last interval, which was sound while every interval came from a
+  point offset back by the same half-width. A meeting at 12:00 arrives before a
+  prompt at 12:02 whose window opens at 11:57, and the three minutes in front
+  were silently dropped. `TestAttentionBeforeAMeetingIsNotLost` fails without
+  the sort; it was checked by removing it.
+- **A project's `wall` reached only the last timestamp.** It is "first trace to
+  last", and a meeting is the one event that lasts, so a project whose day was
+  one long call reported half an hour of wall against an hour of attention —
+  wall shorter than the time inside it. Found by the documentation review, not
+  by the code review: the number was consistent with its own definition and
+  wrong against the report beside it.
+
+`ownSpan` is the one place that decides which durations are spans.
+`turn_duration` deliberately is not one — the turn already has events at both
+ends, so counting it would count the same seconds twice.
+
+### What is stored, and what is read and thrown away
+
+Start, end, title. The title goes in `title`, the length in `duration_ms`, and
+the calendar's own id in `entrypoint` — the column that already meant "which
+instance of a source wrote this", alongside `chrome` and `cli`.
+
+Attendees are read in exactly one place, to answer whether *you* declined, and
+never written. The description, the location, the organiser and the conference
+link are not read at all. The raw feed is parsed from memory and never reaches
+a disk: caching it would put more on the machine than the database is allowed
+to hold.
+
+### The identity, and the bug it prevents
+
+`external_id` is `<calendar>/<UID>/<occurrence>`. All three parts are needed:
+
+- an iCalendar UID is unique **within** a calendar, not across two. An
+  invitation keeps the organiser's UID in every attendee's copy, so subscribing
+  to a work calendar and a shared one that both hold the same meeting produces
+  one UID twice. With a dedup key of UID alone the second is dropped on the
+  unique index — no error, no warning, an import reporting success while
+  holding half the meetings;
+- the occurrence separates the instances of a repeating series.
+
+Two calendars sharing an *id* would do the same damage, so a repeated id is a
+fatal config error rather than a warning.
+
+### Bounded on purpose, because the bytes are somebody else's
+
+- The response is capped **after decompression**: `net/http` asks for gzip and
+  unwraps it, so `Content-Length` says nothing about what it expands to.
+- One content line is capped.
+- Recurrence expansion is capped twice — periods examined and occurrences
+  produced. `RRULE:FREQ=SECONDLY` with neither `COUNT` nor `UNTIL` is a legal
+  rule that never ends, and it arrives over the network.
+- Hitting any cap is reported as a warning. A series that stopped early is
+  hours missing from a day, which is the one failure this tool can least
+  afford.
+- A rule the parser does not implement (`BYSETPOS` and friends) is refused and
+  reported rather than half-expanded. Guessing puts a meeting on a day it never
+  happened.
+
+### The URL is a credential, and Go's defaults leak it
+
+Three of them, each verified in the standard library source rather than
+recalled:
+
+- **`net/url.Error` prints the whole URL** (`%s %q: %s`). The ordinary
+  `fmt.Errorf("...: %w", err)` therefore puts a private calendar address on
+  stderr the first time a connection is refused, and from there into a
+  screenshot or a pasted issue. `scrub` keeps the cause and drops the address.
+- **A redirect sends the previous URL as `Referer`**, path included, and Go's
+  default policy allows ten hops to any host. `checkRedirect` deletes the
+  header — which works because net/http assigns it immediately *above* the
+  `CheckRedirect` call, not after.
+- **Transparent gzip**, covered above.
+
+There is no flag for the URL and `add-calendar` will not take it as an
+argument: `/proc/<pid>/cmdline` is world-readable by default.
+
+### What it skips, and why the counts are printed
+
+Cancelled, all-day, `TRANSP:TRANSPARENT`, declined-by-you, zero-length and
+longer-than-a-day entries are dropped, along with events carrying no usable
+UID, and `ingest` prints how many of each.
+
+A repeating event whose rule this parser will not guess at gets a counter of
+its own — `not expanded`. It had none for four review passes: the event was not
+unreadable, so it fell through every category and a whole series contributed
+nothing with only a warning to say so. That is the exact shape this block of
+counters exists to make impossible, surviving four passes inside the mechanism
+built to catch it. A source that
+silently discards two thirds of a file looks exactly like a source that works.
+
+All-day entries are the one to watch: importing a holiday as a twenty-four
+hour interval would claim the whole day as attention and make the coverage
+number meaningless.
+
+### Loose ends for whoever comes next
+
+- **Only one calendar has ever been read.** Multiple calendars are in the
+  identity, in the config and in the tests, but on synthetic fixtures only. The
+  real check is the day one meeting arrives from two subscriptions.
+- **The refusal branch has never fired on real data.** No rule in the feed
+  measured needed `BYSETPOS`, so the "reported, not expanded" path is covered
+  by tests and nothing else.
+- **A meeting gets its project from a title rule or from its neighbours**, like
+  a browser cluster. There is no way to say "this whole calendar is that
+  project". Whether that is missing is a question for the interface stage,
+  when it becomes visible how many meetings are unnamed.
+- **`TRANSP:TRANSPARENT` is a judgement.** It is the calendar's own word for
+  "this does not make me busy", and focus-time blocks are often written that
+  way. If those turn out to be real work, this is the line to revisit.
+- **The expansion window is 400 days back and 31 forward.** Re-reading is free
+  on the dedup key, but a database rebuilt from scratch over a longer history
+  than that silently gets nothing older.
+- **The same bug has now been found at three frequencies, which is a shape
+  problem rather than three mistakes.** "This period says which month but not
+  which day, so the day comes from DTSTART" was missing under MONTHLY with
+  `BYMONTH` (pass one), under DAILY with `BYMONTHDAY` (pass two) and under
+  WEEKLY with `BYMONTH` (pass three). Each time the answer expanded to every
+  day of the month and each time it looked like a plausible number. They are
+  fixed and pinned, but the defaulting lives in three separate branches of
+  `occurrencesIn`, so a fourth frequency is one `BY` combination away from the
+  same fault. The structural fix is one place that decides which days of a
+  period an occurrence may fall on, with the frequency choosing the period
+  rather than the rule; that is a rewrite of `occurrencesIn` and wants its own
+  change, not a fourth patch.
+- **A meeting that was moved is never corrected.** The dedup key is
+  `<calendar>/<UID>/<occurrence>` and inserts ignore conflicts, which buys
+  idempotence and nothing else: there is no delete path anywhere in
+  `internal/store`. A single meeting rescheduled from 10:00 to 14:00 keeps its
+  UID, so the new time is dropped as a duplicate and the database keeps the old
+  hour. A whole series moved changes every occurrence key, so the new
+  occurrences are inserted and the old ones stay — and both are counted. A
+  meeting cancelled after it was imported is skipped at parse time and its row
+  survives. This is a real hole, not a deliberate boundary, and it is the
+  "quietly too big" kind. The shape of the fix is a per-calendar sweep of the
+  window: delete this calendar's rows in [from, to) and rewrite them, which is
+  a change to how the store is used rather than to the source.
+- **A meeting is cut at midnight rather than split.** It belongs to the day it
+  started on, and the part after midnight is dropped. Counting it on both days
+  would be worse and splitting an event across days changes what a day is, but
+  it does mean a call from 23:00 to 02:00 reports three hours as one.
+- **`ingest` prints its warnings on stdout, and this file says they belong on
+  stderr.** That is older than the calendar — every source has always done it —
+  but the calendar is what made it matter: unreadable events, unexpanded rules,
+  a truncated feed and "configured but not enabled" all flow through there now,
+  mixed in with the counts a person reads to decide whether a source worked.
+  Deliberately not changed here: it moves the browser's and Claude Code's
+  output too, and a change to what every source prints should be reviewed on
+  its own rather than arriving inside a stage about meetings.
+- **`golang.org/x/term` is a new dependency**, for reading the URL without
+  echoing it. Pure Go, no cgo, but it is the third dependency in a project that
+  had two, and it is **pinned to v0.27.0 on purpose**. `@latest` is v0.46.0,
+  whose own go.mod requires Go 1.26 — taking it raises the minimum Go version
+  for everybody in exchange for not echoing one prompt. Pinning the older
+  `golang.org/x/sys` it wants instead dragged `modernc.org/sqlite` back from
+  v1.58.0 to v1.35.0. v0.27.0 costs neither: the go directive stays at 1.25.0
+  and `x/sys` stays where SQLite put it. Check both before bumping it.
+
+## Next: confirming the day
+
+The terminal interface: walk the blocks, name what the rules could not, and
+store the answer as a rule so the question is asked once.

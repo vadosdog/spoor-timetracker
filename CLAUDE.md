@@ -23,8 +23,11 @@ first, other people like it second.
    machine dependent lives in the config. Tests run on synthetic fixtures,
    never on a dump of real sessions.
 2. **No network without explicit permission.** By default the tool does not go
-   out at all. When an LLM mode appears it will be off, and README will say so
-   above the install instructions.
+   out at all. There is exactly one outbound path — the calendar source, which
+   fetches an iCalendar feed — and it is off until two settings and a file are
+   written by hand; `ingest --no-calendar` turns it off whatever the config
+   says. README carries a Network section above the install instructions, and
+   any future path (an LLM mode, say) joins it under the same terms.
 3. **Idempotence.** A second run over the same data gives the same result and
    creates no duplicates. Proven by a test, not by eye.
 4. **Reproducible linking.** Two runs over the same data, one result. Event
@@ -95,7 +98,10 @@ internal/rules       the dictionary: which project an event is, and which
                      subject inside it. Compiled from the config, applied
                      when a report is built
 internal/report      blocks, attribution, the four numbers, both renderers
-internal/source/…    one package per source: claudecode, browser
+internal/source/…    one package per source: claudecode, browser, calendar
+internal/text        string repair: valid UTF-8, and nothing that would make a
+                     value display as something it is not. One of it, shared by
+                     every source that reads somebody else's bytes
 internal/paths       XDG locations
 docs/status.md       where the work stopped and what is next
 ```
@@ -177,6 +183,41 @@ docs/status.md       where the work stopped and what is next
   `report --unmatched` is what stops that being invisible; it is the
   maintenance loop, and anything that makes the dictionary harder to grow
   line by line is the wrong change.
+
+## What the calendar source knows about its own format
+
+Measured against a real feed and seven rounds of review. Ignoring one of these
+produces a wrong number rather than an error, which is why they are here.
+
+- **The URL is a credential, and three of Go's defaults work against that.**
+  `url.Error` prints the whole URL, so a wrapped transport error puts it on
+  stderr — `scrub` replaces it. A redirect sends the previous URL as
+  `Referer` — `checkRedirect` deletes the header. And `net/http` asks for gzip
+  and unwraps it, so `Content-Length` describes the compressed body and bounds
+  nothing: that one is **not** turned off, it is answered by capping the
+  stream *after* decompression. Replacing that cap with a `Content-Length`
+  check would reopen it. Never assume a fourth default is not waiting.
+- **Expand the repetition rules; never half-expand one.** A rule the parser
+  does not implement is refused and counted, because a guessed rule puts a
+  meeting on a day it never happened. The same bug — "this period names a
+  month but not a day, so the day comes from DTSTART" — has been found under
+  three different frequencies; if you touch `occurrencesIn`, assume there is a
+  fourth.
+- **A UID is unique within a calendar, not across two.** An invitation keeps
+  the organiser's UID in every attendee's copy, so the identity has to be
+  calendar + UID + occurrence or a second subscription silently drops its
+  meetings on the unique index.
+- **One bad event costs that event; a bad file costs the file.** A property
+  this parser cannot use is recorded on the event and counted. Structural
+  damage — an event inside an event, a download that stopped — refuses the
+  feed, because that is the file being wrong rather than one entry in it.
+- **Everything is bounded, including the complaints.** Response size after
+  decompression, line length, UID, expansion periods and occurrences, and how
+  many kinds of warning one feed may produce. A limit that is reached is
+  always reported.
+- **Attendees are read in one place and never stored**, to answer whether the
+  user declined. Description, location, organiser and conference link are not
+  read at all.
 
 ## What the Claude Code source knows about its own format
 

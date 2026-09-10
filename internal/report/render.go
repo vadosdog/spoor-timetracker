@@ -271,7 +271,7 @@ func writeSummary(b *strings.Builder, r Report) {
 	fmt.Fprintf(tw, "active\t%s\t%s\n", hm(t.Active), coverage(t))
 	if t.OneNeighbour > 0 {
 		fmt.Fprintf(tw, "of which named by one neighbour\t%s\t%s\n", hm(t.OneNeighbour),
-			"browsing with a named block on one side only and nothing on the other")
+			"a block with no project of its own — browsing, or a meeting — with a named block on one side only")
 	}
 	_ = tw.Flush()
 }

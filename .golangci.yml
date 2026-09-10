@@ -14,6 +14,11 @@ linters:
   settings:
     misspell:
       locale: UK
+      # iCalendar property names, spelled the way RFC 5545 spells them. The
+      # calendar source names them in comments and its fixtures contain them
+      # verbatim; correcting them to British English would make both wrong.
+      ignore-rules:
+        - organizer
     errcheck:
       # Writing to stdout/stderr: if that fails there is nowhere left to
       # report it, and the exit code is already the answer.

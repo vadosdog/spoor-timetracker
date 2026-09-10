@@ -26,12 +26,12 @@ package rules
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"strings"
 
 	"github.com/vadosdog/spoor-timetracker/internal/config"
 	"github.com/vadosdog/spoor-timetracker/internal/event"
+	"github.com/vadosdog/spoor-timetracker/internal/paths"
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
 )
@@ -785,17 +785,7 @@ func compileMatcher(owner string, paths, keys config.Strings, branches, titles c
 	return m, problems
 }
 
-// expandHome turns a leading "~" into the home directory. Nothing else is
-// expanded: a config that interpolated environment variables would mean one
-// thing in a terminal and another under cron, and this file has to mean the
-// same in both.
-func expandHome(p string) (string, error) {
-	if p != "~" && !strings.HasPrefix(p, "~/") {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("starts with ~ and there is no home directory: %w", err)
-	}
-	return home + strings.TrimPrefix(p, "~"), nil
-}
+// expandHome is paths.ExpandHome. There is one of it, in the package that owns
+// where things live, because the calendar source needs the same rule and a
+// second copy is how the two drift apart.
+func expandHome(p string) (string, error) { return paths.ExpandHome(p) }

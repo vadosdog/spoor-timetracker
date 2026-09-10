@@ -5,12 +5,19 @@
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY,
 
-    -- Which plugin produced this: 'claude-code' or 'browser'.
+    -- Which plugin produced this: 'claude-code', 'browser' or 'calendar'.
     source         TEXT    NOT NULL,
     -- The source's own identity for the event. For Claude Code it is the
     -- JSONL `uuid`; for the browser it is
-    -- <flavour>/<profile>/<visit time>/<visit id>. Together with source it is
-    -- the dedup key: re-importing the same line can never create a second row.
+    -- <flavour>/<profile>/<visit time>/<visit id>; for the calendar it is
+    -- <calendar>/<UID>/<occurrence>. Together with source it is the dedup key:
+    -- re-importing the same line can never create a second row.
+    --
+    -- The calendar id is in there because an iCalendar UID is unique within
+    -- one calendar and not across two: an invitation keeps the organiser's UID
+    -- in every attendee's copy, so the same meeting subscribed to twice would
+    -- otherwise collide on this index and the second one would be dropped with
+    -- no error and no warning.
     external_id    TEXT    NOT NULL,
 
     -- When it happened. RFC3339, UTC, millisecond precision, always ending
@@ -18,6 +25,12 @@ CREATE TABLE IF NOT EXISTS events (
     ts             TEXT    NOT NULL,
     -- How long it took, when the source actually reports it. NULL means
     -- "a point in time", which is the common case, not "zero".
+    --
+    -- Two sources fill it and the report reads only one of them. A meeting's
+    -- length is the sole evidence that hour existed, because nothing is
+    -- written to disk during a call; Claude Code's system/turn_duration
+    -- describes a turn that already has events at both of its ends, so
+    -- counting it as a span would count the same seconds twice.
     duration_ms    INTEGER,
 
     -- The source's own classification, kept verbatim.
@@ -33,9 +46,9 @@ CREATE TABLE IF NOT EXISTS events (
     -- Claude Code core fields. Present in 100% of core rows, all clients,
     -- all versions. Kept as columns rather than a JSON blob so the database
     -- stays readable. Empty on rows from any other source, with one
-    -- exception: entrypoint names the program that wrote the trace, which is
-    -- 'cli' or 'claude-desktop' for Claude Code and 'chrome' or 'firefox'
-    -- for the browser.
+    -- exception: entrypoint names which instance of a source produced the
+    -- trace — 'cli' or 'claude-desktop' for Claude Code, 'chrome' or 'firefox'
+    -- for the browser, and the calendar's own id for a meeting.
     session_id     TEXT    NOT NULL DEFAULT '',
     cwd            TEXT    NOT NULL DEFAULT '',
     git_branch     TEXT    NOT NULL DEFAULT '',
@@ -69,16 +82,23 @@ CREATE TABLE IF NOT EXISTS events (
     -- line separators, direction overrides — replaced by a space. Metadata by
     -- the rules of this project, and the one browser column that can still be
     -- revealing: the title of a search result page is the search query.
+    -- The calendar fills this one too, with the meeting's summary. Same
+    -- column, same repair, same warning: it is chosen by whoever sent the
+    -- invitation, and it is the only field of a meeting that is stored. The
+    -- attendees are read in one place, to answer whether you declined, and
+    -- never written. The description, the location, the organiser and the
+    -- conference link are not read at all.
     title          TEXT    NOT NULL DEFAULT '',
-    -- Every column carrying bytes from the browser — host, path_head, title
-    -- and external_id above — holds what came out of somebody else's
-    -- database or off a directory name, so anything in them that is not
-    -- valid UTF-8, or that would make the value display as something it is
-    -- not, is replaced. A path older than UTF-8 is encoded in the page's own
-    -- charset, and a Latin-1 '/caf%E9/' therefore reads as 'caf�' here:
-    -- a character the page never contained, standing in for a byte SQLite would
-    -- otherwise refuse to hand back at all — which would fail the whole
-    -- query, not just that value.
+    -- Every column carrying bytes somebody else wrote — host, path_head,
+    -- title and external_id above for the browser, and title, external_id and
+    -- entrypoint for the calendar — holds what came out of another program's
+    -- database, off a directory name, or off the network, so anything in
+    -- them that is not valid UTF-8, or that would make the value display as
+    -- something it is not, is replaced. A path older than UTF-8 is encoded
+    -- in the page's own charset, and a Latin-1 '/caf%E9/' therefore reads
+    -- as 'caf�' here: a character the page never contained, standing in for
+    -- a byte SQLite would otherwise refuse to hand back at all — which would
+    -- fail the whole query, not just that value.
 
     -- When spoor first saw it. The event outlives its source file; this is
     -- the only way to tell how long ago that import happened.

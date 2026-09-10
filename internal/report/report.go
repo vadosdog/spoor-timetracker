@@ -31,6 +31,7 @@ import (
 
 	"github.com/vadosdog/spoor-timetracker/internal/event"
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
+	"github.com/vadosdog/spoor-timetracker/internal/source/calendar"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
 )
 
@@ -374,8 +375,14 @@ type ProjectCount struct {
 
 // entry is an event with its timestamp parsed and its project resolved.
 type entry struct {
-	e       event.Event
-	t       time.Time
+	e event.Event
+	t time.Time
+	// end is when the event stopped. Equal to t for almost everything: a
+	// prompt, a commit and a page visit are moments, and the time around them
+	// is inferred from their neighbours. A meeting is the exception — it
+	// carries its own length, which is the only evidence that hour exists at
+	// all, because nothing else happens on disk while it runs.
+	end     time.Time
 	project string
 	// subject is what the dictionary called this one event, and it stays that
 	// way: nothing below fills it in from a neighbour.
@@ -416,7 +423,8 @@ func Build(events []event.Event, from, to time.Time, opts Options) Report {
 			project, subject = opts.Attribution.Resolve(e)
 		}
 		entries = append(entries, entry{
-			e: e, t: local, project: project, subject: subject, own: project != "",
+			e: e, t: local, end: local.Add(ownSpan(e)),
+			project: project, subject: subject, own: project != "",
 		})
 	}
 	// The store hands events back in a total order already. Sorting again is
@@ -458,7 +466,15 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		return day
 	}
 	day.First = entries[0].t
-	day.Last = entries[len(entries)-1].t
+	// The last moment of the day, which a meeting can push past the last
+	// trace: the call was still running when the last page was opened. Never
+	// past midnight, though — see clampToDay.
+	day.Last = entries[0].t
+	for _, en := range entries {
+		if e := clampToDay(en.end, date); e.After(day.Last) {
+			day.Last = e
+		}
+	}
 
 	blocks := splitBlocks(entries, opts.ClusterGap)
 	origins, candidates := attribute(entries, blocks)
@@ -523,11 +539,16 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		// is the right way round for a tool whose whole point is not to
 		// overstate. With any sane setting it never binds anyway: two blocks
 		// are more than the clustering threshold apart by definition.
-		from, to := entries[b.lo].t, entries[b.hi-1].t
+		// The block's own bounds, before anything is added at either end. The
+		// end is the greatest end rather than the last timestamp: a meeting
+		// that started before the last trace of the block can still finish
+		// after it.
+		blockFrom, blockTo := entries[b.lo].t, clampToDay(blockEnd(entries[b.lo:b.hi]), date)
+		from, to := blockFrom, blockTo
 		if opts.Head > 0 && entries[b.lo].e.Source == claudecode.SourceName && isAttentionPoint(entries[b.lo].e) {
 			head := opts.Head
 			if bi > 0 {
-				if half := entries[b.lo].t.Sub(entries[blocks[bi-1].hi-1].t) / 2; head > half {
+				if half := blockFrom.Sub(blockEnd(entries[blocks[bi-1].lo:blocks[bi-1].hi])) / 2; head > half {
 					head = half
 				}
 			}
@@ -550,7 +571,7 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		if opts.Tail > 0 && touched {
 			tail := opts.Tail
 			if bi+1 < len(blocks) {
-				if half := entries[blocks[bi+1].lo].t.Sub(entries[b.hi-1].t) / 2; tail > half {
+				if half := entries[blocks[bi+1].lo].t.Sub(blockTo) / 2; tail > half {
 					tail = half
 				}
 			}
@@ -580,15 +601,38 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 			// prompt under "the agent worked in the background".
 			human bool
 		}
-		stretches := make([]stretch, 0, b.hi-b.lo+1)
-		if from.Before(entries[b.lo].t) {
-			stretches = append(stretches, stretch{from, entries[b.lo].t, b.lo, true})
+		// The cuts inside the block: every moment something starts, and every
+		// moment something that had a length of its own stops. With nothing
+		// but points these are exactly the event timestamps and this is the
+		// old loop written differently. With a meeting in the block it is the
+		// difference between charging its hour to the meeting and charging it
+		// to whatever happened to be open before it.
+		cuts := make([]time.Time, 0, 2*(b.hi-b.lo))
+		for i := b.lo; i < b.hi; i++ {
+			cuts = append(cuts, entries[i].t)
+			if entries[i].end.After(entries[i].t) && entries[i].end.Before(blockTo) {
+				cuts = append(cuts, entries[i].end)
+			}
 		}
-		for i := b.lo; i < b.hi-1; i++ {
-			stretches = append(stretches, stretch{entries[i].t, entries[i+1].t, i, false})
+		cuts = append(cuts, blockTo)
+		sort.Slice(cuts, func(i, j int) bool { return cuts[i].Before(cuts[j]) })
+
+		stretches := make([]stretch, 0, len(cuts)+1)
+		if from.Before(blockFrom) {
+			stretches = append(stretches, stretch{from, blockFrom, b.lo, true})
 		}
-		if to.After(entries[b.hi-1].t) {
-			stretches = append(stretches, stretch{entries[b.hi-1].t, to, b.hi - 1, true})
+		// Each stretch is charged to the last event that had already started
+		// when it opened — which for points alone is the event that opens it,
+		// exactly as before.
+		at := b.lo
+		for i := 0; i+1 < len(cuts); i++ {
+			for at+1 < b.hi && !entries[at+1].t.After(cuts[i]) {
+				at++
+			}
+			stretches = append(stretches, stretch{cuts[i], cuts[i+1], at, false})
+		}
+		if to.After(blockTo) {
+			stretches = append(stretches, stretch{blockTo, to, b.hi - 1, true})
 		}
 
 		// Gaps run between blocks, not between runs. Reading the end of the
@@ -699,7 +743,7 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 				p.Work = &work
 			}
 		}
-		fillEvidence(&p, entries)
+		fillEvidence(&p, entries, date)
 		p.Candidates = candidatesFor(name, blocks, entries, candidates)
 		// Every subject seen under this project gets a row, including one that
 		// holds no time: a single page about a ticket is a real trace of that
@@ -803,16 +847,66 @@ func candidatesFor(name string, blocks []block, entries []entry, candidates map[
 // block is a half-open index range into the day's entries.
 type block struct{ lo, hi int }
 
+// The pause is measured from the end of everything so far, not from the start
+// of the previous event. For points those are the same thing. For a meeting
+// they are an hour apart, and measuring from its start would cut the block in
+// the middle of the call: the next trace, twenty minutes after the meeting
+// ended, would look like a pause of eighty minutes rather than of twenty.
+//
+// Entries are sorted by start, so the running maximum is what "so far" means:
+// a short meeting nested inside a long one must not pull the end backwards.
 func splitBlocks(entries []entry, gap time.Duration) []block {
 	var blocks []block
 	lo := 0
+	end := time.Time{}
+	if len(entries) > 0 {
+		end = entries[0].end
+	}
 	for i := 1; i < len(entries); i++ {
-		if entries[i].t.Sub(entries[i-1].t) > gap {
+		if entries[i].t.Sub(end) > gap {
 			blocks = append(blocks, block{lo, i})
 			lo = i
+			end = entries[i].end
+			continue
+		}
+		if entries[i].end.After(end) {
+			end = entries[i].end
 		}
 	}
 	return append(blocks, block{lo, len(entries)})
+}
+
+// clampToDay stops an interval at midnight.
+//
+// A day is built from the events whose start falls in it, and a meeting that
+// begins at 23:00 and runs for three hours is one of them. Without this the
+// day would hold twenty-five hours: the block would run to 02:00 the next
+// morning, the span the coverage number divides by would be longer than a day,
+// and the row labelled the 4th would report a last trace dated the 5th. The
+// tail extension has always been clamped this way; the block's own end was not,
+// which was a hole this stage opened.
+//
+// The hour after midnight is dropped rather than moved: the meeting is one
+// event with one timestamp, and it belongs to the day it started on. Counting
+// it on both days would be worse, and splitting an event across two days is a
+// change to what a day is, not a clamp. Written down in docs/status.md.
+func clampToDay(t, date time.Time) time.Time {
+	if end := nextMidnight(date); t.After(end) {
+		return end
+	}
+	return t
+}
+
+// blockEnd is the last moment a block covers: the greatest end in it, which is
+// the last event's timestamp unless a meeting inside it runs on past that.
+func blockEnd(entries []entry) time.Time {
+	end := entries[0].end
+	for _, en := range entries[1:] {
+		if en.end.After(end) {
+			end = en.end
+		}
+	}
+	return end
 }
 
 // attribute fills in the project of every event that arrived without one.
@@ -978,7 +1072,7 @@ func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions
 		last := -1
 		for i := b.lo; i < b.hi; i++ {
 			prev[i-b.lo] = last
-			if isAttentionPoint(entries[i].e) {
+			if owns(entries[i].e) {
 				last = i
 			}
 		}
@@ -986,7 +1080,7 @@ func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions
 		following := -1
 		for i := b.hi - 1; i >= b.lo; i-- {
 			next[i-b.lo] = following
-			if isAttentionPoint(entries[i].e) {
+			if owns(entries[i].e) {
 				following = i
 			}
 		}
@@ -1003,7 +1097,7 @@ func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions
 			sessions[i] = entries[touch].e.SessionID
 		}
 		for i := b.lo; i < b.hi; i++ {
-			if isAttentionPoint(entries[i].e) {
+			if owns(entries[i].e) {
 				claim(i, i)
 				continue
 			}
@@ -1097,7 +1191,7 @@ func liveSessions(entries []entry, gap time.Duration) []liveRun {
 // fell in an earlier block — falls back to any event carrying a project. There
 // is nothing better to go on, and leaving it unnamed would lose real work.
 func anchors(block []entry) func(i int) bool {
-	prompt := func(i int) bool { return block[i].own && isAttentionPoint(block[i].e) }
+	prompt := func(i int) bool { return block[i].own && owns(block[i].e) }
 	for i := range block {
 		if prompt(i) {
 			return prompt
@@ -1114,15 +1208,71 @@ func anchors(block []entry) func(i int) bool {
 // session where the agent worked for forty minutes without being spoken to
 // contributes five minutes of attention at each end and thirty of background,
 // which is what the concept asks for and roughly what it feels like.
+// A meeting joins as itself: the interval it declares, not a window of a
+// fixed width. An hour in a call is an hour of a person's attention, and the
+// calendar is the only thing that knows where it started and stopped.
+//
+// The sort is load-bearing, not tidiness. windows.add compares a new interval
+// against the last one only, which is sound while every interval starts after
+// the previous one did — true when they all come from points in time order,
+// each offset back by the same half-width. It stops being true the moment two
+// kinds are mixed: a meeting at 12:00 arrives before a prompt at 12:02 whose
+// window opens at 11:57, and add would then extend the meeting's window
+// forwards while silently dropping the three minutes in front of it. Sorting
+// by start restores the precondition instead of leaving it to luck.
 func attentionWindows(entries []entry, half time.Duration) windows {
-	var w windows
+	type span struct{ from, to time.Time }
+	spans := make([]span, 0, len(entries))
 	for _, en := range entries {
-		if !isAttentionPoint(en.e) {
-			continue
+		switch {
+		case ownSpan(en.e) > 0:
+			spans = append(spans, span{en.t, en.end})
+		case isAttentionPoint(en.e):
+			spans = append(spans, span{en.t.Add(-half), en.t.Add(half)})
 		}
-		w.add(en.t.Add(-half), en.t.Add(half))
+	}
+	sort.SliceStable(spans, func(i, j int) bool { return spans[i].from.Before(spans[j].from) })
+
+	var w windows
+	for _, s := range spans {
+		w.add(s.from, s.to)
 	}
 	return w
+}
+
+// ownSpan is how long an event lasted by its own account, rather than by what
+// happened next.
+//
+// Only the calendar answers with anything. That is not a special case for one
+// source, it is the difference between two kinds of duration:
+//
+//   - A meeting's length is the only evidence the hour exists. Nothing is
+//     written to disk during a call, so without it the day has a hole exactly
+//     where it was busiest — which is the entire reason this source was added.
+//   - Claude Code's turn_duration is the other kind: the turn already has
+//     events at both of its ends, so the block spans it whether or not the
+//     number is read. Adding it would count evidence that is already counted,
+//     and it is the agent's time rather than the person's. Whether that time
+//     belongs in the totals is the `--count-background` question, decided
+//     elsewhere and on purpose.
+//
+// So a duration becomes a span only where nothing else could have measured it.
+func ownSpan(e event.Event) time.Duration {
+	if e.Source != calendar.SourceName || e.DurationMS == nil || *e.DurationMS <= 0 {
+		return 0
+	}
+	return time.Duration(*e.DurationMS) * time.Millisecond
+}
+
+// owns reports whether an event is the person themselves, and therefore names
+// the seconds around it rather than borrowing a name from a neighbour.
+//
+// Every attention point is one. So is a meeting, which is a person in a room
+// for an hour — but a meeting is not an attention *point*, because a point
+// casts a window of a fixed width around itself and a meeting already knows
+// exactly how wide it is.
+func owns(e event.Event) bool {
+	return isAttentionPoint(e) || ownSpan(e) > 0
 }
 
 func isAttentionPoint(e event.Event) bool {
@@ -1144,8 +1294,15 @@ func isAttentionPoint(e event.Event) bool {
 	return false
 }
 
-// windows is a sorted, disjoint set of intervals. Attention points arrive in
-// time order, so a new window either extends the last one or starts after it.
+// windows is a sorted, disjoint set of intervals.
+//
+// add compares against the last interval only, so intervals must be handed
+// over in order of their start. That was free while they all came from points
+// in time order; with meetings in the mix it is a precondition somebody has to
+// meet, and attentionWindows meets it by sorting. Handing over an interval
+// that starts earlier than the previous one does not fail — it quietly loses
+// the part in front, which is the kind of wrong number this whole file is
+// written to avoid.
 type windows struct {
 	from []time.Time
 	to   []time.Time
@@ -1478,7 +1635,7 @@ func distinctProjects(entries []entry) []string {
 // Wall is filled in here too: it is the span from a project's first event of
 // the day to its last, which is the number four parallel chats would give you
 // if their hours were simply added up.
-func fillEvidence(p *Project, entries []entry) {
+func fillEvidence(p *Project, entries []entry, date time.Time) {
 	sources := map[string]int{}
 	keys := map[string]int{}
 	var first, last time.Time
@@ -1489,7 +1646,18 @@ func fillEvidence(p *Project, entries []entry) {
 		if first.IsZero() {
 			first = en.t
 		}
-		last = en.t
+		// The end, not the timestamp: a meeting is the one event that lasts,
+		// and reading only its start made wall come out *shorter* than the
+		// attention inside it — a project whose day was one long call
+		// reported half an hour of wall against an hour of attention.
+		//
+		// Clamped at midnight like every other reading of a meeting's end.
+		// Without that, a call from 23:00 to 02:00 gave the row labelled the
+		// 4th three hours of wall for a day whose last trace is midnight —
+		// the same invariant the block end already learned, one field along.
+		if e := clampToDay(en.end, date); e.After(last) {
+			last = e
+		}
 		p.Events++
 		sources[en.e.Source]++
 		if k := browserKey(en.e); k != "" {

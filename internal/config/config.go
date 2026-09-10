@@ -30,9 +30,140 @@ import (
 // Config is the whole file. It grows one section per stage.
 type Config struct {
 	Browser     Browser     `yaml:"browser"`
+	Calendar    Calendar    `yaml:"calendar"`
 	Report      Report      `yaml:"report"`
 	Attribution Attribution `yaml:"attribution"`
 }
+
+// Calendar configures the one source that can reach the network.
+//
+// Everywhere else in spoor a setting decides how something on this machine is
+// read. This one decides whether the machine talks to anybody at all, so it is
+// off unless it is switched on, and switching it on takes two deliberate acts:
+// this flag, and a file holding an address that is not in this file.
+type Calendar struct {
+	// Enabled is the network switch, and it is here rather than implied by the
+	// presence of a calendar so that the promise can be read rather than
+	// deduced. Somebody checking whether this tool goes out should find the
+	// answer on one line, not work it out from whether a file exists.
+	Enabled bool `yaml:"enabled"`
+
+	// Sources are the calendars to read, in the order written. More than one
+	// is the normal case — a work calendar and a shared team one — and the
+	// plural is here from the start because the alternative is a dedup key
+	// that has to change later, which re-imports the whole history as new
+	// rows.
+	Sources []CalendarSource `yaml:"sources"`
+}
+
+// CalendarSource is one feed.
+type CalendarSource struct {
+	// ID names the calendar. It is part of the identity of every event read
+	// from it, so two calendars must not share one — see Validate.
+	ID string `yaml:"id"`
+
+	// URLFile is the path to a file holding the feed's address and nothing
+	// else. The address itself is deliberately not a setting: an iCalendar
+	// URL is a bearer credential that reads the whole calendar, and this file
+	// is the artefact people paste into issues, show in chat and commit to
+	// dotfile repositories. ssh keeps the key out of ssh_config for the same
+	// reason, and git keeps it out of .gitconfig.
+	//
+	// Left out, it defaults to a file named after the id, next to this one.
+	URLFile string `yaml:"url_file"`
+
+	// File is a downloaded .ics read straight off the disk, for a machine
+	// that is not to go out at all. The same parser, a different way in.
+	// Mutually exclusive with URLFile.
+	File string `yaml:"file"`
+
+	// Me is the addresses that are the reader. A feed says which attendee
+	// declined an invitation; it does not say which attendee is you. Without
+	// this, a meeting you turned down is imported like any other, because the
+	// alternative is guessing. Addresses are read to answer that one question
+	// and are never stored.
+	Me Strings `yaml:"me"`
+}
+
+// Validate reports what is wrong with the calendar section.
+//
+// Fatal comes first and is fatal on purpose. A repeated id is not a style
+// problem: the id is part of every event's identity, so two calendars sharing
+// one means the second calendar's meetings collide with the first's on the
+// unique index and are dropped — no error, no warning, an import that reports
+// success and quietly holds half the meetings. That is the exact failure this
+// project has already paid for once.
+//
+// The rest are warnings, and they exist because the worst thing a config line
+// can do is parse, look right and never fire.
+func (c Calendar) Validate() (fatal []Problem, warnings []Problem) {
+	seen := map[string]int{}
+	for i, s := range c.Sources {
+		where := fmt.Sprintf("calendar #%d", i+1)
+		if s.ID != "" {
+			where = fmt.Sprintf("calendar %q", s.ID)
+		}
+		switch {
+		case s.ID == "":
+			fatal = append(fatal, Problem{where,
+				"has no id; the id is part of the identity of every meeting read from it"})
+		case seen[s.ID] > 0:
+			fatal = append(fatal, Problem{where, fmt.Sprintf(
+				"is also the id of calendar #%d; two calendars sharing an id would "+
+					"silently drop the second one's meetings as duplicates", seen[s.ID])})
+		case !plainName(s.ID):
+			// The id names a file when url_file is left out, so it has to be
+			// a name and not a path. Refused rather than escaped, because an
+			// id is written once by hand and a rule is easier to read than a
+			// transformation.
+			fatal = append(fatal, Problem{where,
+				"has an id that is not a plain name; letters, digits, '-', '_' and '.' only"})
+		}
+		seen[s.ID] = i + 1
+
+		if s.URLFile != "" && s.File != "" {
+			fatal = append(fatal, Problem{where,
+				`has both "url_file" and "file"; it is one or the other`})
+		}
+		if s.File != "" && !c.Enabled {
+			continue // a local file needs no network and no switch
+		}
+		if !c.Enabled {
+			warnings = append(warnings, Problem{where,
+				"is configured but calendar.enabled is false, so it is not read"})
+		}
+	}
+	if c.Enabled && len(c.Sources) == 0 {
+		warnings = append(warnings, Problem{"calendar",
+			"is enabled but lists no sources, so nothing is read"})
+	}
+	return fatal, warnings
+}
+
+// plainName reports whether s can stand as one path element.
+func plainName(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Problem is one thing wrong with the file: what it is about, and what is
+// wrong with it.
+type Problem struct {
+	Entry  string
+	Reason string
+}
+
+func (p Problem) String() string { return p.Entry + " " + p.Reason }
 
 // Report configures how events are turned into a day.
 //

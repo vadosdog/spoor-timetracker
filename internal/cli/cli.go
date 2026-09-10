@@ -10,6 +10,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/vadosdog/spoor-timetracker/internal/report"
 	"github.com/vadosdog/spoor-timetracker/internal/rules"
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
+	"github.com/vadosdog/spoor-timetracker/internal/source/calendar"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
 	"github.com/vadosdog/spoor-timetracker/internal/store"
 )
@@ -38,11 +40,17 @@ Usage:
   spoor count  [flags]   how many events the database holds for a date range
   spoor version          print the version
 
+  spoor add-calendar <id>   store a calendar's private URL, safely
+
 Sources: claude-code (session logs), browser (Chrome history; Firefox
-untested — see README).
+untested — see README), calendar (an iCalendar feed; off by default).
 
 Run "spoor <command> -h" for the flags of a command.
-spoor never uses the network.
+
+spoor reads what is already on this machine. The one exception is the
+calendar source, which fetches a feed over the network: it is off unless
+calendar.enabled is set in the config, and "ingest --no-calendar" turns it
+off whatever the config says. See "Network" in the README.
 `
 
 // Run executes one command. It returns the process exit code.
@@ -60,6 +68,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runReport(args[1:], stdout, stderr)
 	case "count":
 		err = runCount(args[1:], stdout)
+	case "add-calendar":
+		err = runAddCalendar(args[1:], stdout, os.Stdin)
 	case "version":
 		fmt.Fprintln(stdout, Version)
 	case "-h", "--help", "help":
@@ -92,11 +102,17 @@ func runIngest(args []string, stdout io.Writer) error {
 	srcDir := fs.String("claude-dir", "", "Claude Code projects directory (default: ~/.claude/projects)")
 	noClaude := fs.Bool("no-claude-code", false, "skip the Claude Code source")
 	noBrowser := fs.Bool("no-browser", false, "skip the browser source")
+	noCalendar := fs.Bool("no-calendar", false, "skip the calendar source, whatever the config says — this is what guarantees no network")
 	var history repeatedPath
 	fs.Var(&history, "browser-history", "read this browser history database instead of the ones found automatically; repeatable")
+	back := fs.Duration("calendar-back", defaultCalendarBack, "how far back to expand calendar events")
+	forward := fs.Duration("calendar-forward", defaultCalendarForward, "how far ahead to expand calendar events")
 	quiet := fs.Bool("quiet", false, "print nothing unless something went wrong")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *back < 0 || *forward < 0 {
+		return errors.New("--calendar-back and --calendar-forward are lengths of time; neither can be negative")
 	}
 
 	cfg, err := loadConfig(*cfgPath)
@@ -125,6 +141,18 @@ func runIngest(args []string, stdout io.Writer) error {
 		}
 		warnings = append(warnings, rep...)
 	}
+	// A broken calendar section must not throw away what the other sources
+	// already imported, and must not be reported as a successful run either.
+	// So the failure is held: everything else finishes, the totals print, the
+	// message prints, and the exit code still says something went wrong.
+	var deferred error
+	if !*noCalendar {
+		rep, err := ingestCalendar(st, cfg, *back, *forward, stdout, *quiet)
+		if err != nil {
+			deferred = err
+		}
+		warnings = append(warnings, rep...)
+	}
 
 	total, err := st.TotalEvents()
 	if err != nil {
@@ -136,7 +164,7 @@ func runIngest(args []string, stdout io.Writer) error {
 	for _, w := range warnings {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
-	return nil
+	return deferred
 }
 
 func ingestClaudeCode(st *store.Store, root string, stdout io.Writer, quiet bool) ([]string, error) {
@@ -234,6 +262,116 @@ func ingestBrowser(st *store.Store, cfg config.Config, named []string, stdout io
 		}
 	}
 	return append(warnings, rep.Errors...), nil
+}
+
+// How far either way calendar events are expanded, when no flag says
+// otherwise. Far enough back that the database can be built from scratch over
+// a history worth reporting on, and a month ahead because a feed holds the
+// future and the day after tomorrow is a legitimate thing to ask about.
+//
+// Re-reading is free: the dedup key means a second run over the same window
+// inserts nothing, so the window can be generous without the database growing
+// twice.
+const (
+	defaultCalendarBack    = 400 * 24 * time.Hour
+	defaultCalendarForward = 31 * 24 * time.Hour
+)
+
+// ingestCalendar runs the one source that can reach the network.
+//
+// Three things have to be true before a packet is sent, and each is checked
+// here rather than deeper down where it would be harder to see: the config
+// says enabled, at least one calendar is configured, and --no-calendar was not
+// given. A calendar reading a local file skips the first of those, because a
+// file on disk is not the network.
+func ingestCalendar(st *store.Store, cfg config.Config, back, forward time.Duration, stdout io.Writer, quiet bool) ([]string, error) {
+	// A broken calendar section costs the calendar section. The other sources
+	// have already imported by the time this runs, and throwing their run away
+	// over a repeated id would lose work that was fine — the same doctrine as
+	// "one calendar that cannot be read costs that calendar".
+	//
+	// It is still not a warning among warnings: a repeated id silently drops a
+	// calendar's meetings on the unique index, which looks exactly like a
+	// calendar with nothing in it, so nothing is read until it is fixed.
+	fatal, warnings := cfg.Calendar.Validate()
+	if len(fatal) > 0 {
+		return problemStrings(warnings), fmt.Errorf("calendar: %s — no calendar was read", fatal[0])
+	}
+
+	msgs := problemStrings(warnings)
+
+	var cals []calendar.Calendar
+	for _, s := range cfg.Calendar.Sources {
+		// A configured calendar that is not switched on is not read, and
+		// Validate has already said so on the warning list. A calendar
+		// pointing at a file on disk needs no switch: it goes nowhere.
+		if s.File == "" && !cfg.Calendar.Enabled {
+			continue
+		}
+		// Both paths are typed by a person into the config, so both get the
+		// same "~" as every other path setting. Without this the very path
+		// the README recommends parses, looks right and finds nothing.
+		file, err := paths.ExpandHome(s.File)
+		if err != nil {
+			return msgs, fmt.Errorf("calendar %q: %w", s.ID, err)
+		}
+		c := calendar.Calendar{ID: s.ID, File: file, Me: s.Me}
+		if s.File == "" {
+			c.URLFile, err = paths.ExpandHome(s.URLFile)
+			if err != nil {
+				return msgs, fmt.Errorf("calendar %q: %w", s.ID, err)
+			}
+			if c.URLFile == "" {
+				if c.URLFile, err = paths.CalendarSecret(s.ID); err != nil {
+					return msgs, err
+				}
+			}
+		}
+		cals = append(cals, c)
+	}
+	// Nothing to read is not a failure and not worth a line: a machine with no
+	// calendar configured is the default, and the default says nothing.
+	if len(cals) == 0 {
+		return msgs, nil
+	}
+
+	now := time.Now()
+	rep, err := calendar.Ingest(context.Background(), st, cals, calendar.Options{
+		From: now.Add(-back),
+		To:   now.Add(forward),
+	})
+	if err != nil {
+		return msgs, err
+	}
+	if !quiet {
+		fmt.Fprintf(stdout, "calendar: %d calendars (%d read), %d entries, %d meetings\n",
+			rep.Calendars, rep.CalendarsRead, rep.Counts.Events, rep.Counts.Meetings)
+		fmt.Fprintf(stdout, "  events: %d found, %d new\n", rep.Events, rep.NewEvents)
+		// Everything the source refused, on a line of its own. A source that
+		// silently drops most of a file looks exactly like one that works, and
+		// the numbers here are how somebody notices that "all day" entries or
+		// a "free" marker are eating their meetings.
+		if n := rep.Counts.Cancelled + rep.Counts.AllDay + rep.Counts.Free +
+			rep.Counts.Declined + rep.Counts.Instant + rep.Counts.Overlong +
+			rep.Counts.Unexpanded + rep.Counts.Unreadable; n > 0 {
+			fmt.Fprintf(stdout,
+				"  skipped: %d cancelled, %d all-day, %d marked free, %d declined, "+
+					"%d with no length, %d longer than a day, %d not expanded, %d unreadable\n",
+				rep.Counts.Cancelled, rep.Counts.AllDay, rep.Counts.Free,
+				rep.Counts.Declined, rep.Counts.Instant, rep.Counts.Overlong,
+				rep.Counts.Unexpanded, rep.Counts.Unreadable)
+		}
+	}
+	msgs = append(msgs, rep.Counts.Notes...)
+	return append(msgs, rep.Errors...), nil
+}
+
+func problemStrings(ps []config.Problem) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.String())
+	}
+	return out
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -495,18 +633,18 @@ func runCount(args []string, stdout io.Writer) error {
 	dbPath := fs.String("db", "", "database file (default: XDG data dir)")
 	from := fs.String("from", "", "first local day, YYYY-MM-DD (default: 6 days before --to)")
 	to := fs.String("to", "", "last local day, inclusive, YYYY-MM-DD (default: today)")
-	source := fs.String("source", "", "restrict to one source: claude-code or browser")
+	source := fs.String("source", "", "restrict to one source: claude-code, browser or calendar")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// With two valid values, a silent "0 events" is a coin flip between "I
-	// have none of that" and "I typed it wrong".
+	// With three valid values, a silent "0 events" is a guess between "I have
+	// none of that" and "I typed it wrong".
 	switch *source {
-	case "", claudecode.SourceName, browser.SourceName:
+	case "", claudecode.SourceName, browser.SourceName, calendar.SourceName:
 	default:
-		return fmt.Errorf("--source: no such source %q; there are %s and %s",
-			*source, claudecode.SourceName, browser.SourceName)
+		return fmt.Errorf("--source: no such source %q; there are %s, %s and %s",
+			*source, claudecode.SourceName, browser.SourceName, calendar.SourceName)
 	}
 
 	last, err := parseDay(*to, time.Now())

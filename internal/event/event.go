@@ -23,6 +23,12 @@ type Event struct {
 	TS string
 	// DurationMS is set only when the source reports a real duration.
 	// A nil value means "point in time", not "zero seconds".
+	//
+	// Two sources set it and the report treats them differently on purpose. A
+	// meeting's length is the only evidence its hour existed, so it becomes a
+	// span of the day; Claude Code's system/turn_duration describes a turn
+	// that already has events at both ends, so reading it as a span would
+	// count the same seconds twice. See ownSpan in the report package.
 	DurationMS *int64
 	// Type and Subtype are the source's own classification, kept verbatim so
 	// the database stays readable and the raw shape stays recoverable.
@@ -34,9 +40,10 @@ type Event struct {
 	// RawText is a short metadata label ("what happened"), never content.
 	RawText string
 
-	// Entrypoint names the program that wrote the trace: "cli" or
-	// "claude-desktop" for Claude Code, "chrome" or "firefox" for the
-	// browser. It is the one field both sources fill.
+	// Entrypoint names which instance of a source produced the trace: "cli"
+	// or "claude-desktop" for Claude Code, "chrome" or "firefox" for the
+	// browser, the calendar's own id for a meeting. It is the one field every
+	// source fills.
 	Entrypoint string
 
 	// Fields below are Claude Code shaped. The plugin contract that
@@ -66,15 +73,23 @@ type Event struct {
 	// delimiters, so anything else ends it whether or not it was predicted.
 	// See pathHead in the browser source for why it is that way round.
 	PathHead string
-	// Title is the page title the browser recorded, capped at 4096 characters,
-	// with anything that could make it display as something else replaced by a
-	// space. Metadata by the rules of this project, and still the most
-	// revealing browser field there is: the title of a search result page is
-	// the search query.
+	// Title is the page title the browser recorded, or the summary of a
+	// meeting, capped at 4096 characters, with anything that could make it
+	// display as something else replaced by a space. Metadata by the rules of
+	// this project, and still the most revealing field there is: the title of
+	// a search result page is the search query, and the summary of a meeting
+	// is what somebody called it.
+	//
+	// For a meeting it is also the only thing kept. Attendees are read to
+	// answer whether the user declined, and go no further; the description,
+	// the location and the conference link are not read at all.
 	Title string
-	// Host, PathHead, Title and ExternalID are all repaired on the way in —
-	// to valid UTF-8, and free of anything that would make them display as
-	// something else. They carry bytes from somebody else's database or from
-	// a directory name, and a Latin-1 path is not text. What SQLite cannot
-	// decode it refuses to return at all, failing the whole query.
+	// Every field carrying bytes somebody else wrote is repaired on the way
+	// in — to valid UTF-8, and free of anything that would make it display as
+	// something it is not. For the browser that is Host, PathHead, Title and
+	// ExternalID; for the calendar, Title, ExternalID and Entrypoint. They
+	// come out of another program's database, off a directory name, or off
+	// the network, and a Latin-1 path is not text. What SQLite cannot decode
+	// it refuses to return at all, failing the whole query rather than
+	// answering it wrongly. See internal/text, of which there is one.
 }
