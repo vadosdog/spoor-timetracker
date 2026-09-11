@@ -128,6 +128,66 @@ func TestTheNumbersAgreeWithEachOther(t *testing.T) {
 					runAttention, d.Attention)
 			}
 
+			// The partition. It is what a confirmed day is stored as, so a
+			// stretch missing from it is an hour that will be missing from
+			// the frozen day for ever — and the frozen day is not recomputed,
+			// which is the point of freezing it. Nothing else in this file
+			// would notice: the totals are summed on their own path.
+			var inStretches, stretchAttention, stretchPadding time.Duration
+			var last time.Time
+			for _, s := range d.Stretches {
+				if !s.To.After(s.From) {
+					where("stretch %s–%s is empty or runs backwards", s.From, s.To)
+				}
+				if s.From.Before(date) || s.To.After(end) {
+					where("stretch %s–%s is outside the day", s.From, s.To)
+				}
+				if !last.IsZero() && s.From.Before(last) {
+					where("stretch at %s overlaps the one before it", s.From)
+				}
+				last = s.To
+				inStretches += s.Duration()
+				switch s.Kind {
+				case KindAttention:
+					stretchAttention += s.Duration()
+				case KindPadding:
+					stretchAttention += s.Duration()
+					stretchPadding += s.Duration()
+				case KindBackground:
+				default:
+					where("stretch at %s has no kind", s.From)
+				}
+			}
+			if inStretches != d.Active {
+				where("the partition holds %s, the day holds %s", inStretches, d.Active)
+			}
+			if stretchAttention != d.Attention {
+				where("the partition holds %s of attention, the day holds %s",
+					stretchAttention, d.Attention)
+			}
+			if stretchPadding != d.Padding {
+				where("the partition holds %s of padding, the day holds %s",
+					stretchPadding, d.Padding)
+			}
+			// And it agrees with the rows, project by project. The totals and
+			// the partition are filled on the same pass but from different
+			// variables, and an assignment that moved one without the other
+			// would show up here and nowhere else.
+			perProject := map[string]time.Duration{}
+			for _, s := range d.Stretches {
+				perProject[s.Project] += s.Duration()
+			}
+			for _, p := range d.Projects {
+				if got := perProject[p.Name]; got != p.Attention+p.Background {
+					where("project %q holds %s in the partition and %s in its row",
+						p.Name, got, p.Attention+p.Background)
+				}
+				delete(perProject, p.Name)
+			}
+			for name, held := range perProject {
+				where("the partition holds %s under %q, which has no row", held, name)
+			}
+
 			// Every second counted for a project is counted for the day, and
 			// no project claims more of the clock than the day itself has.
 			var sum time.Duration
@@ -236,4 +296,154 @@ func TestMoreWindowIsNeverLessAttention(t *testing.T) {
 			prev = rep.Total.Attention
 		}
 	}
+}
+
+// A pause somebody called work must never be counted as active time as well.
+//
+// The claimed line means "between blocks, where nothing was recorded". Block
+// boundaries move whenever a setting does, so an answer given yesterday can
+// find itself partly inside a block today — and counting it in both places is
+// the same hour twice, which is the mistake this whole project is written
+// against. The other direction matters too: an answer must not evaporate
+// because a threshold moved.
+func TestAClaimedPauseIsNeverAlsoActive(t *testing.T) {
+	for seed := int64(0); seed < 120; seed++ {
+		nextID = 0
+		rng := rand.New(rand.NewSource(seed))
+		events := randomDay(rng)
+		from := day(2026, 5, 4)
+
+		// Find the day's pauses at one setting, answer them all, then read the
+		// day back at a different one — which is what a config edit does.
+		loose := Options{ClusterGap: 30 * time.Minute}
+		var answers []Pause
+		for _, d := range Build(events, from, from.AddDate(0, 0, 2), loose).Days {
+			for _, r := range d.Runs {
+				if r.Gap {
+					answers = append(answers, Pause{From: r.From, To: r.To, Worked: true, Project: "claimed"})
+				}
+			}
+		}
+		if len(answers) == 0 {
+			continue
+		}
+
+		tight := Options{ClusterGap: 5 * time.Minute, Head: 4 * time.Minute, Tail: 4 * time.Minute, Pauses: answers}
+		rep := Build(events, from, from.AddDate(0, 0, 2), tight)
+		for di, d := range rep.Days {
+			date := from.AddDate(0, 0, di)
+			// Nothing claimed may overlap anything active.
+			var active time.Duration
+			for _, r := range d.Runs {
+				if !r.Gap {
+					active += r.To.Sub(r.From)
+				}
+			}
+			// Against the measured time itself, not against the length of a
+			// day. "Claimed plus active is under 24 hours" is satisfied by an
+			// hour counted as both, which on a generated day it nearly always
+			// is — the bound has to be the overlap, and the overlap has to be
+			// none. The pauses being claimed here are the gaps of a looser
+			// partition, so under a tighter one they may fall inside a block:
+			// whatever a block covers is measured time, and measured time is
+			// never also claimed.
+			var overlap time.Duration
+			for _, a := range answers {
+				for _, r := range d.Runs {
+					if r.Gap {
+						continue
+					}
+					lo, hi := a.From, a.To
+					if r.From.After(lo) {
+						lo = r.From
+					}
+					if r.To.Before(hi) {
+						hi = r.To
+					}
+					if hi.After(lo) {
+						overlap += hi.Sub(lo)
+					}
+				}
+			}
+			if d.Claimed > 0 && d.Claimed+active > dayLength(date)-overlap+time.Second {
+				t.Errorf("seed %d, day %s: claimed %s and active %s together exceed "+
+					"the day less the %s they share — some of it is counted twice",
+					seed, date.Format("01-02"), d.Claimed, active, overlap)
+			}
+			// And the claimed total is still the projects' claimed added up.
+			var byProject time.Duration
+			for _, p := range d.Projects {
+				byProject += p.Claimed
+			}
+			if byProject != d.Claimed {
+				t.Errorf("seed %d, day %s: rows hold %s of claimed, the day says %s",
+					seed, date.Format("01-02"), byProject, d.Claimed)
+			}
+		}
+	}
+}
+
+// Two answers that overlap each other are one stretch of a day, not two.
+//
+// The ordinary way there: answer a pause, then an import splits it, so the two
+// halves are asked about again while the whole is still on record. Adding all
+// three would count the overlap twice — quietly more than there was, which is
+// what this project exists to prevent.
+func TestOverlappingAnswersAreCountedOnce(t *testing.T) {
+	from := day(2026, 5, 4)
+	events := []event.Event{
+		prompt("09:00:00", "alpha"), prompt("09:05:00", "alpha"),
+		prompt("13:00:00", "alpha"), prompt("13:05:00", "alpha"),
+	}
+	gap := func() (time.Time, time.Time) {
+		for _, r := range Build(events, from, from.AddDate(0, 0, 1), Options{}).Days[0].Runs {
+			if r.Gap {
+				return r.From, r.To
+			}
+		}
+		t.Fatal("no gap in this fixture")
+		return time.Time{}, time.Time{}
+	}
+	at, until := gap()
+	half := at.Add(until.Sub(at) / 2)
+
+	for _, c := range []struct {
+		name   string
+		pauses []Pause
+	}{
+		{"the whole, then both halves", []Pause{
+			{From: at, To: until, Worked: true, Project: "alpha"},
+			{From: at, To: half, Worked: true, Project: "alpha"},
+			{From: half, To: until, Worked: true, Project: "alpha"},
+		}},
+		{"both halves, then the whole", []Pause{
+			{From: at, To: half, Worked: true, Project: "alpha"},
+			{From: half, To: until, Worked: true, Project: "alpha"},
+			{From: at, To: until, Worked: true, Project: "alpha"},
+		}},
+		{"the same answer twice", []Pause{
+			{From: at, To: until, Worked: true, Project: "alpha"},
+			{From: at, To: until, Worked: true, Project: "alpha"},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := Build(events, from, from.AddDate(0, 0, 1), Options{Pauses: c.pauses})
+			if want := until.Sub(at); got.Days[0].Claimed != want {
+				t.Errorf("claimed %s, want %s — the overlap was counted twice",
+					got.Days[0].Claimed, want)
+			}
+			var byProject time.Duration
+			for _, p := range got.Days[0].Projects {
+				byProject += p.Claimed
+			}
+			if byProject != got.Days[0].Claimed {
+				t.Errorf("rows hold %s and the day says %s", byProject, got.Days[0].Claimed)
+			}
+		})
+	}
+}
+
+// dayLength is how long a local day is, which is not always 24 hours.
+func dayLength(date time.Time) time.Duration {
+	return date.AddDate(0, 0, 1).Sub(date)
 }

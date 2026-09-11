@@ -139,7 +139,13 @@ type Counts struct {
 	// and nothing else — and none of them is Unexpanded above, which is a
 	// readable event whose repetition rule is simply not implemented.
 	Unreadable int
-	Notes      []string
+	// Truncated is a series this parser stopped expanding because it hit a
+	// cap. Like Unreadable and Unexpanded it is spoor failing to understand
+	// the feed rather than the feed saying the meetings are gone, and the one
+	// operation in the program that deletes rows has to be able to tell the
+	// two apart.
+	Truncated int
+	Notes     []string
 }
 
 // add sums one calendar's counts into a running total.
@@ -159,6 +165,7 @@ func (c *Counts) add(o Counts) {
 	c.Instant += o.Instant
 	c.Overlong += o.Overlong
 	c.Unexpanded += o.Unexpanded
+	c.Truncated += o.Truncated
 	c.Unreadable += o.Unreadable
 	c.Notes = append(c.Notes, o.Notes...)
 }
@@ -384,6 +391,7 @@ func meetingsOf(v vevent, opts Options, overridden map[string]map[string]bool, c
 	// ending exactly at From is excluded, as it is for an event with no rule.
 	starts, truncated := rule.expand(v.start, opts.From.Add(-length).Add(time.Nanosecond), opts.To)
 	if truncated {
+		counts.Truncated++
 		addNote(notes, "a recurrence rule hit an expansion limit; that series is incomplete")
 	}
 	starts = append(starts, inWindow(v.rdates, opts.From.Add(-length).Add(time.Nanosecond), opts.To)...)
@@ -450,6 +458,17 @@ func recurrenceKey(t time.Time) string {
 	return t.UTC().Format(tsLayout)
 }
 
+// entrypointOf is how a calendar's id is written into the entrypoint column —
+// the column that already meant "which instance of a source wrote this".
+//
+// There is one of it because two places need the same answer and they must not
+// each have their own: ToEvent writes the value, and the window sweep selects
+// on it. A sweep looking for the unsanitised id would find nothing, delete
+// nothing, and leave the double counting exactly where it was, silently.
+func entrypointOf(calendarID string) string {
+	return text.Sanitise(calendarID, text.Replacement)
+}
+
 // ToEvent turns a meeting into the record the store keeps.
 //
 // The identity is the calendar, the UID and the occurrence — all three. A UID
@@ -457,6 +476,11 @@ func recurrenceKey(t time.Time) string {
 // keeps the organiser's UID in every copy of it, so the same meeting arrives
 // from two calendars carrying one identifier, and the unique index would drop
 // the second silently, importing nothing and reporting success.
+//
+// It is not, however, enough to make a *moved* meeting arrive: rescheduling
+// changes none of the three, so the row has to be updated rather than
+// inserted, and a whole series moved changes every occurrence, so the rows it
+// left behind have to be deleted. See store.ReplaceWindow.
 func ToEvent(m Meeting, calendarID string) event.Event {
 	subtype := ""
 	if m.Recurring {
@@ -473,6 +497,6 @@ func ToEvent(m Meeting, calendarID string) event.Event {
 		Type:       "event",
 		Subtype:    subtype,
 		Title:      m.Summary,
-		Entrypoint: text.Sanitise(calendarID, text.Replacement),
+		Entrypoint: entrypointOf(calendarID),
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,9 +36,12 @@ var Version = "dev"
 const usage = `spoor — reconstructs the working day from traces already on disk.
 
 Usage:
-  spoor ingest [flags]   read sources and store what they show
-  spoor report [flags]   what a day or a week went on
-  spoor count  [flags]   how many events the database holds for a date range
+  spoor ingest  [flags]  read sources and store what they show
+  spoor report  [flags]  what a day or a week went on
+  spoor confirm [flags]  walk a day, name what the rules could not, and freeze it
+  spoor assign  [flags]  one answer, without the terminal
+  spoor export  [flags]  write a confirmed day out
+  spoor count   [flags]  how many events the database holds for a date range
   spoor version          print the version
 
   spoor add-calendar <id>   store a calendar's private URL, safely
@@ -66,6 +70,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runIngest(args[1:], stdout)
 	case "report":
 		err = runReport(args[1:], stdout, stderr)
+	case "confirm":
+		err = runConfirm(args[1:], stdout, stderr, isTerminal())
+	case "assign":
+		err = runAssign(args[1:], stdout, stderr)
+	case "export":
+		err = runExport(args[1:], stdout, stderr)
 	case "count":
 		err = runCount(args[1:], stdout)
 	case "add-calendar":
@@ -160,6 +170,24 @@ func runIngest(args []string, stdout io.Writer) error {
 	}
 	if !*quiet {
 		fmt.Fprintf(stdout, "database: %d events total\n", total)
+	}
+
+	// A confirmed day is a number somebody has already filed, and this is the
+	// command that can now move the evidence under one: the calendar restates
+	// its window, and a history database can hand over visits dated last week.
+	// Nothing here reopens the day or changes what it says — the snapshot is
+	// the answer and it stands — but a run that quietly changed the ground
+	// under it would be the tool disagreeing with itself in silence.
+	disturbed, err := st.ConfirmedDaysDisturbed(time.Local)
+	if err != nil {
+		return err
+	}
+	if len(disturbed) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s now holds different events from when it was confirmed; the snapshot "+
+				"still reads as it did, and `spoor confirm --day=%s --reconfirm` "+
+				"is how to take the day again",
+			strings.Join(disturbed, ", "), disturbed[0]))
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
@@ -347,19 +375,34 @@ func ingestCalendar(st *store.Store, cfg config.Config, back, forward time.Durat
 		fmt.Fprintf(stdout, "calendar: %d calendars (%d read), %d entries, %d meetings\n",
 			rep.Calendars, rep.CalendarsRead, rep.Counts.Events, rep.Counts.Meetings)
 		fmt.Fprintf(stdout, "  events: %d found, %d new\n", rep.Events, rep.NewEvents)
+		// A feed restates its window rather than adding to it, so this source
+		// is the one that can change and remove what is already stored. Both
+		// numbers are printed whenever they are not zero, because a day
+		// quietly getting smaller deserves the same visibility as one quietly
+		// getting bigger.
+		if rep.MovedEvents > 0 || rep.RemovedEvents > 0 {
+			fmt.Fprintf(stdout, "  restated: %d moved or renamed, %d no longer in the feed\n",
+				rep.MovedEvents, rep.RemovedEvents)
+		}
 		// Everything the source refused, on a line of its own. A source that
 		// silently drops most of a file looks exactly like one that works, and
 		// the numbers here are how somebody notices that "all day" entries or
 		// a "free" marker are eating their meetings.
+		// Every counter the line prints is a counter that can make it print.
+		// Truncated was added to the line and not to this sum, so a feed whose
+		// only refusal was a series cut short printed no line at all — the one
+		// counter that means "spoor did not understand the whole of this", and
+		// the most valuable of the nine.
 		if n := rep.Counts.Cancelled + rep.Counts.AllDay + rep.Counts.Free +
 			rep.Counts.Declined + rep.Counts.Instant + rep.Counts.Overlong +
-			rep.Counts.Unexpanded + rep.Counts.Unreadable; n > 0 {
+			rep.Counts.Unexpanded + rep.Counts.Truncated + rep.Counts.Unreadable; n > 0 {
 			fmt.Fprintf(stdout,
 				"  skipped: %d cancelled, %d all-day, %d marked free, %d declined, "+
-					"%d with no length, %d longer than a day, %d not expanded, %d unreadable\n",
+					"%d with no length, %d longer than a day, %d not expanded, "+
+					"%d cut short, %d unreadable\n",
 				rep.Counts.Cancelled, rep.Counts.AllDay, rep.Counts.Free,
 				rep.Counts.Declined, rep.Counts.Instant, rep.Counts.Overlong,
-				rep.Counts.Unexpanded, rep.Counts.Unreadable)
+				rep.Counts.Unexpanded, rep.Counts.Truncated, rep.Counts.Unreadable)
 		}
 	}
 	msgs = append(msgs, rep.Counts.Notes...)
@@ -419,6 +462,7 @@ func runReport(args []string, stdout, stderr io.Writer) error {
 	head := fs.Duration("head", report.DefaultHead, "time spent writing a prompt, added before a block that opens with one")
 	tail := fs.Duration("tail", report.DefaultTail, "time spent reading the last answer, added after a block that had somebody in it")
 	countBackground := fs.Bool("count-background", false, "add the agent's own time to the totals")
+	recompute := fs.Bool("recompute", false, "for a confirmed day: show what the rules would say now, and write nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -537,9 +581,118 @@ func runReport(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
+	// A confirmed day is read, not computed. That is the whole point of
+	// confirming one: rules run when a report is built, so without this a day
+	// somebody has already acted on moves the next time a rule does.
+	// --subject is a filter on what is printed, so a frozen day answers it
+	// from its own rows like any other question about it. --unmatched is not:
+	// it is a list of traces no rule named, which lives in the events and not
+	// in the snapshot, so that one is computed — and says so, rather than
+	// letting a reader compare it against a frozen table and wonder.
+	if day.set && !*unmatched {
+		snapshot, ok, err := st.Confirmed(from.Format(time.DateOnly))
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := sayIfRulesMoved(stderr, *cfgPath, snapshot); err != nil {
+				return err
+			}
+			if !*recompute {
+				// A flag that can quietly do nothing ships with the line that
+				// says so. These five are parsed, and then every one of them
+				// is overwritten by what the day was frozen under — which is
+				// the point of freezing it, and is invisible from the table.
+				if moved := discarded(fs, *cfgPath); len(moved) > 0 {
+					fmt.Fprintf(stderr,
+						"%s is confirmed, so it is read rather than computed: %s "+
+							"%s no effect here; --recompute shows what the rules "+
+							"would say now, and writes nothing\n",
+						snapshot.Day, strings.Join(moved, ", "),
+						map[bool]string{true: "has", false: "have"}[len(moved) == 1])
+				}
+				answered, err := st.WindowAnswers(snapshot.Day)
+				if err != nil {
+					return err
+				}
+				rep := fromSnapshot(snapshot, from, to, opts, answered)
+				rep.Timeline = *timeline
+				rep.MinRow = *minRow
+				rep.Subject = *subject
+				if *asJSON {
+					return report.RenderJSON(stdout, rep)
+				}
+				return report.RenderTable(stdout, rep)
+			}
+			fmt.Fprintf(stderr,
+				"%s is confirmed; this is what the rules would say now, and nothing is written\n",
+				snapshot.Day)
+		}
+	}
+
+	if day.set && *unmatched {
+		if _, ok, err := st.Confirmed(from.Format(time.DateOnly)); err != nil {
+			return err
+		} else if ok {
+			fmt.Fprintf(stderr,
+				"%s is confirmed; --unmatched is a list of traces, which a snapshot "+
+					"does not keep, so this is computed from the rules as they stand now\n",
+				from.Format(time.DateOnly))
+		}
+	}
+
 	events, err := st.EventsBetween(from, to)
 	if err != nil {
 		return err
+	}
+
+	// And what a person said about stretches no rule could name. Applied here
+	// as well as in `confirm`, so that a day looked at either way is the same
+	// day: a flag that changes what the tool believes and not what it prints
+	// would be worse than no flag at all.
+	//
+	// Every day of the range, not only a single one. A week is the number
+	// somebody actually files, and a week whose Tuesday ignored what was said
+	// about it would disagree with the Tuesday they read yesterday.
+	var confirmedInRange []string
+	for d := from; d.Before(to); d = addDays(d, 1) {
+		name := d.Format(time.DateOnly)
+		saved, err := st.Assignments(name)
+		if err != nil {
+			return err
+		}
+		for _, a := range saved {
+			opts.Manual = append(opts.Manual, report.Assignment{
+				From: a.From.In(from.Location()), To: a.To.In(from.Location()),
+				Project: a.Project, Subject: a.Subject,
+				ClearSubject: a.ClearSubject, OneOff: a.OneOff,
+			})
+		}
+		pauses, err := st.WindowAnswers(name)
+		if err != nil {
+			return err
+		}
+		for _, a := range pauses {
+			opts.Pauses = append(opts.Pauses, report.Pause{
+				From: a.From.In(from.Location()), To: a.To.In(from.Location()),
+				Worked: a.Worked, Project: a.Project, Subject: a.Subject,
+			})
+		}
+		if _, ok, err := st.Confirmed(name); err != nil {
+			return err
+		} else if ok && !day.set {
+			confirmedInRange = append(confirmedInRange, name)
+		}
+	}
+	// A range is computed from the rules, snapshot or no snapshot: one report
+	// cannot be half read and half computed without saying which line is
+	// which. Said out loud rather than left to be noticed by a total that does
+	// not match the days it is made of.
+	if len(confirmedInRange) > 0 {
+		fmt.Fprintf(stderr,
+			"%d day(s) in this range are confirmed and are recomputed here anyway: %s. "+
+				"Ask about one of them with --day to read the frozen numbers\n",
+			len(confirmedInRange), strings.Join(confirmedInRange, ", "))
 	}
 
 	// To stderr, and that is not a detail: stdout here is a document. One
@@ -554,6 +707,13 @@ func runReport(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "warning: attribution: %q %s\n", p.Entry, p.Reason)
 	}
 
+	// A range that a dated rule starts inside holds two dictionaries, and the
+	// table under it looks like one. Said on stderr, with the others, so that
+	// --json stays a document.
+	for _, line := range dictionary.Starts(from, to) {
+		fmt.Fprintf(stderr, "the rules change inside this range — %s\n", line)
+	}
+
 	rep := report.Build(events, from, to, opts)
 	rep.Timeline = *timeline
 	rep.MinRow = *minRow
@@ -563,6 +723,23 @@ func runReport(args []string, stdout, stderr io.Writer) error {
 		return report.RenderJSON(stdout, rep)
 	}
 	return report.RenderTable(stdout, rep)
+}
+
+// discarded names the flags that were given and will be ignored, because a
+// confirmed day is read with the settings it was confirmed under.
+func discarded(fs *flag.FlagSet, _ string) []string {
+	settings := map[string]bool{
+		"gap": true, "attention-window": true, "head": true, "tail": true,
+		"count-background": true,
+	}
+	var out []string
+	fs.Visit(func(f *flag.Flag) {
+		if settings[f.Name] {
+			out = append(out, "--"+f.Name)
+		}
+	})
+	sort.Strings(out)
+	return out
 }
 
 // dateFlag is a flag that works both bare and with a date: --day means today,

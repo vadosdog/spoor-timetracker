@@ -1287,7 +1287,331 @@ number meaningless.
   v1.58.0 to v1.35.0. v0.27.0 costs neither: the go directive stays at 1.25.0
   and `x/sys` stays where SQLite put it. Check both before bumping it.
 
-## Next: confirming the day
+## Stage 4 — confirming the day. Done 2026-09-10.
 
-The terminal interface: walk the blocks, name what the rules could not, and
-store the answer as a rule so the question is asked once.
+`spoor confirm` walks a day, names what the rules could not, and freezes the
+result. The answer becomes a line of the config, so the same question is not
+asked twice; the frozen day is read rather than recomputed, so yesterday's
+numbers stop moving when a rule changes.
+
+Two loose ends from earlier stages were closed here. One was a number quietly
+larger than the truth — a meeting that moved was counted at both times, which
+is the section below. The other was quieter still: the author's dictionary
+lived in a file of notes rather than in the config, so out of the box the tool
+named nothing. It was copied across once, by hand, and there is no command for
+it — see the loose ends at the end.
+
+### What is in place
+
+- `internal/confirm` — the day as a document: the queue of questions, the
+  ladder of proposals, the blocks, and one session that every change goes
+  through. The terminal and the flags both use it, which is what makes
+  "everything the TUI does is available as flags" true by construction.
+- `internal/tui` — bubbletea. It holds no rules: every key builds an Answer and
+  hands it to the session.
+- `internal/configfile` — rules written into the config **as text**, located
+  with a YAML parse. What is added is the lines that were added and every other
+  byte is the byte it was.
+- `internal/export` — an Exporter interface and one implementation, markdown.
+- `internal/store` — four tables for a confirmed day, one for what a person
+  said where no rule could say it, one for what they said about a pause, and
+  `ReplaceWindow`, the only path in the program that deletes an event.
+- `internal/report` grew the partition (`Stretch`), the ground of every stretch,
+  and manual assignments.
+- `internal/rules` grew dated rules and the `ambiguous` list.
+- `internal/cli` grew `confirm`, `assign` and `export`, and `report` now reads a
+  confirmed day instead of computing it.
+
+### The unit of a question is a trace, not a block
+
+One uncovered key seen in eight places is one question: the answer closes all
+eight. Measured over a fortnight of real data: 231 questions, 16.5 a day —
+and the head of the queue is what matters, because it is sorted by how much of
+the day turns on each trace. Four questions a day cover 84% of the time under
+question; the rest is the tail of hosts seen once that stage 3 already measured
+and explained.
+
+**Segments of one host fold into one question**, which removes 49% of the
+queue: 454 questions without it, 231 with. A browser key is a host, a port and
+a first path segment, so fifteen segments of one host were fifteen questions
+about ninety minutes.
+
+**A subject rule alone does nothing, and used to be written alone.** Subjects
+are consulted only after a project has matched, so a browser key filed under
+`projects[X].subjects[Y]` and nowhere else names neither: the event falls
+through to the fallback and the identical question returns the next day. Found
+by somebody marking the same host over and over and concluding the program had
+hung. An answer naming both now writes the trace under both, unless the project
+already names it, and a test walks that path end to end.
+
+**The question screen shows the page titles.** A key on a repository host is
+the host and the account — the repository is a path segment `spoor` does not
+store — so without them the question is unanswerable, and it is the title that
+`t` writes a rule from.
+
+**Four answers on the three screens that ask one**, and everything else behind
+`?`. Told in full under "Four answers, and everything else behind one key"
+below.
+
+**The header counts answered and remaining rather than "3 of 11".** An answered
+question leaves the queue, so an index into a shrinking list stands still while
+the list gets shorter, and a number that does not move while somebody works
+reads as a program that has hung.
+
+**The question screen says what the trace counts for now.** Measured on real
+data: a messaging app, a car forum and an IP lookup service were all being
+counted as the busiest work project of the day — not because they were its, but
+because it was the busiest thing near them. Without that column they are indistinguishable from a CI host that
+is being inherited correctly, and they are not equally urgent.
+
+### Every edit is asked what it is
+
+Three outcomes, one keystroke, every time:
+
+- **this block only** — no rule, nothing else moves;
+- **a rule** — rules run when a report is built, so every unconfirmed day with
+  that trace is renamed;
+- **a rule from the day being confirmed** — everything before it keeps the
+  name it had.
+
+The third exists because rules change in time: the same directory was one
+project six months ago and is another now, and an undated rule lies about the
+past every time one is added. It is written as `{value: X, since: D}` on the entry, and a
+dated rule beats an undated one of the same specificity — so "this is X, and Y
+from D" is two entries and needs no end date.
+
+D is **the day being confirmed**, not the day somebody is sitting at.
+Confirming Monday on Wednesday dates the rule to Monday, so Monday and Tuesday
+move with it and the week before does not.
+
+Which of the three an edit is cannot be worked out from the edit, which is why
+it is asked rather than configured.
+
+### Four answers, and everything else behind one key
+
+A row of thirteen shortcuts is a row nobody reads, and the four that matter
+were somewhere in it. The three screens that ask — a question, a pause, a block
+opened by hand — now offer the same four: `enter` attach, `tab` slot, `N` new,
+`n` nothing, with `s`, `esc`, `q` beside them and `?` for the rest. `?` is a
+screen rather than a longer row because it is read once and the row is read at
+speed. The day, the background line and the one-visit question have less to say
+and show fewer keys.
+
+A capital makes something and a lowercase letter says there is nothing, on
+every screen. The layout map keeps case for the same reason: "Т" is the key "N"
+is printed on, not the key "n" is.
+
+### The screen, and the keyboard
+
+Colour is structure rather than decoration: one accent for what is under the
+cursor, one for the letters that do something, and everything that is context
+dimmed away from the answer. The line saying what the trace counts for *now* is
+the one picked out in a colour of its own, because it is the one somebody has
+to find first. lipgloss decides how much colour the terminal can take and
+writes none at all when the output is not one, which is also what lets the
+tests read plain strings.
+
+And a shortcut is a place on the keyboard rather than a letter: `е` is the key
+`t` is printed on and does the same thing, for every pair on a ЙЦУКЕН layout
+over QWERTY. The line editor is not translated — text is typed in whatever
+alphabet it is written in.
+
+### Pauses get a line, not a share of the day
+
+The time comes from the answer, not from a run that still matches it. Block
+boundaries move whenever a setting does, and an answer that only counted while
+its boundaries lined up evaporated the first time one did — measured: two
+pauses answered, one config edit, and the total went *down*. What a block has
+since grown to cover is subtracted, because that part is measured now and
+counting it twice is the one mistake this project is written against.
+
+The walk is: what the rules could not name, then the visits no rule can name,
+then the pauses between blocks, then the day itself. A pause is one screen at a
+time, shaped like every other question — a project slot, a subject slot, a new
+one on the spot, and "not work" — because a list of pauses with a yes/no beside
+each was a different kind of screen in the middle of a walk and read as a
+different program. And "was that work" alone turned out to be useless: an hour
+attached to nothing answers no question anybody asks, so the answer carries
+what it was.
+
+**A pause is never asked what kind of edit it is.** It has no trace — that is
+what makes it a pause — so nothing could carry a rule, and the three-way
+question every other correction gets would be offering an answer that cannot be
+carried out. Nothing answered here reaches the config file. The pauses are a stop on
+the way rather than an errand beside it — a question reachable only by knowing
+a key is a question most days will not get asked — and a day whose pauses are all
+answered does not stop on them again. The answer
+becomes one line — `pauses you called work` — in the report, in `--json`, in
+the confirmed day and in an export. It is never added to attention, to active
+or to the coverage figure.
+
+All of it works on a day that is already confirmed: `confirm --day=D` on a
+frozen day says so and lands on the pauses, because nothing it records is a
+measurement, and locking it
+would mean throwing a snapshot away to answer a question that does not touch
+it. The one number in the snapshot it refreshes is the claimed line itself.
+
+That shape is the background line's, and for the same reason: nothing measured
+anything in a pause, so a total made of a measurement and somebody's
+recollection is a total nobody can check. Whether it is ever summed is one flag
+and one decision, and neither has been taken.
+
+It is here because the survey's open hypothesis — that a pause should be a
+record of its own — cannot be settled from traces: a cigarette and a meeting
+are the same absence of them. Recomputing the survey's numbers on this stage's
+data moved almost all of them, and moved the deciding one the wrong way: the
+"same project on both sides" signal now holds for 87% of short pauses instead
+of 30%, because inheritance names neighbours alike. A signal that is almost
+always true selects nothing.
+
+So the remaining question is whether it *predicts* anything, and that needs
+answers given on the evening of the day rather than recalled a fortnight later.
+The line is what makes answering worth doing while that is being collected.
+
+### A confirmed day carries the answer, not the evidence
+
+`confirmed_row` keeps the numbers and the event counts; it does not keep which
+hosts and which directories they came from, and the `ON WHAT GROUNDS` column is
+empty for a day that has been confirmed. That is deliberate rather than
+missing: the evidence is in the events table where it always was, a snapshot of
+an answer is not a snapshot of everything that led to it, and copying every
+browser key into a second table would put more traces in the database for no
+question anybody asks of it. `report --day=D --recompute` shows the evidence
+again.
+
+### A confirmed day is a partition
+
+`confirmed_stretch` holds the day cut into pieces with one answer to every
+question: one project, one subject, one kind, one ground. `ground` is not kept
+for the program — it is what lets somebody ask, months later, whether this half
+hour rests on a rule they wrote, a guess from a directory name, the block next
+door, or their own hand.
+
+The report's runs and the stored partition are two readings of one cut, so they
+cannot disagree; an invariant test over 300 random days asserts that the
+partition sums to the day, to its attention, and to every project row.
+
+### Writing to the config without taking it over
+
+The file is written by hand, has comments in it, and is the only place the
+dictionary lives. So it is edited as text: a YAML parse says where the list is,
+and a line is inserted. Re-encoding the parsed tree keeps comments and order —
+yaml.v3 does carry both — and still re-indents, requotes and reflows everything
+its author wrote.
+
+Four shapes of list are handled, because a file written by hand has all four:
+a block list, a list in brackets, a single value written without a list at all,
+and a key with nothing under it yet. A copy is kept once per session, the write
+is a temp file and a rename, permissions are preserved, and a file that changed
+on disk since it was read is refused outright.
+
+### A meeting that moved is corrected
+
+The hole recorded at the end of stage 3.5. A feed does not append, it restates:
+the identity of a meeting is calendar + UID + occurrence, and rescheduling
+changes none of the three, so an insert that ignores conflicts kept the old
+hour for ever. A series moved wholesale changed every occurrence, so the new
+times arrived, the old ones stayed, and the day was counted twice.
+
+`ReplaceWindow` makes the database say about the expanded window exactly what
+the feed now says, for that calendar and nothing else. Rows outside the window
+are untouched — the feed said nothing about them.
+
+**An empty answer is refused** unless the feed held events at all. A feed whose
+events are all cancelled has answered; a feed holding nothing is also what an
+expired address, a login page and a bad morning look like, and only one of
+those means "delete a year of meetings".
+
+### Acceptance
+
+Measured on the same fourteen-day window as every stage since 1.5. The absolute
+numbers live outside this repository with the rest of the measurements.
+
+| Check | Result |
+|---|---|
+| Questions a day | 16.5, of which 3.9 hold 84% of the time under question |
+| Time under question | 7.7% of the day |
+| Queue removed by folding segments into their host | 49% |
+| Building a day's document | 0.31s average, 1.24s worst |
+| A confirmed day after a second import | byte-identical `report --json` |
+| Two exports of one day | byte-identical |
+| Subjects, as a share of their projects' time | 33% |
+
+The last line is the honest one. It is the number stage 3 measured as 37%, on a
+denominator that has since grown by fourteen hours of meetings — which have no
+trace that could carry a subject. How far this stage moves it depends on
+somebody answering questions, and that has not happened yet.
+
+### Loose ends for whoever comes next
+
+- **The dictionary and the queue are different things and one of them was moved
+  by hand.** The author's dictionary lived in a file of notes rather than in the
+  config; it was copied across once. There is no command for that, on purpose:
+  a one-off problem for one person would have become permanent public surface.
+- **Branches and titles raise no questions of their own.** They can carry a rule
+  and they can be answered with — the title answer exists because on a
+  repository host the name is in the title and in no column spoor stores — but
+  they are not enumerated. A title is one string per page, and a question per
+  page is the marking-as-you-go the concept forbids.
+- **A title rule is not scoped to its host, and the interface says so.** Title
+  formats differ between hosts and the config has no way to say "this host *and*
+  this title" (P34). The warning is printed; the rule is still global.
+- **The candidate list ends with the dictionary in file order**, not with
+  projects by their time over the whole database. The second would mean
+  building a report over every day there is, every time a day is opened.
+- **`confirm` refuses to start without a terminal.** `--questions` prints the
+  queue and `--yes` confirms as it stands, both of which work in a pipe.
+- **The encounters queue has never fired on real data.** No trace in the
+  author's dictionary is on the `ambiguous` list yet, so the short question —
+  "this time, which subject" — is covered by tests and nothing else.
+- **bubbletea, and seventeen indirect dependencies behind it.** The project had
+  three direct requirements and nine indirect ones; it now has four and
+  twenty-six. All pure Go, none raising the minimum Go version — checked the
+  same way `golang.org/x/term` was in the last stage — but it is a large step
+  for one terminal interface and worth a look before the first release.
+- **The scope question has no default and cannot be skipped.** That is
+  deliberate and it is also the slowest keystroke in the loop. If two minutes
+  turns out to be tight, this is the first place somebody will want a
+  "remember my answer" switch — and it is the one place the roadmap says there
+  must not be one.
+- **A database made by an intermediate build of this stage has the narrow key
+  on `confirmed_one_off`** — `(day, from_ts)` rather than
+  `(day, from_ts, to_ts)`. Nothing shipped with it, so nobody outside can have
+  one; the columns added to the confirmed tables while the stage was being
+  written are in `addedColumns` and do reach such a database, and there is a
+  test that every entry in that list does. Dropping that one table is the fix
+  if a scratch database from the middle of this stage ever refuses to confirm.
+- **`events` and `claimed_ms` on `confirmed_row` reached the struct and not the
+  SQL, and then the SQL and not `schema.sql`** — the file somebody reads with
+  the database open. Each half was reported as fixed before it was: the value
+  was carried all the way to the insert and dropped there, so nothing failed
+  and the day looked right until it was frozen, and then held zeros. Two tests
+  cover it now. `TestAConfirmedDayRoundTripsEveryField` walks every field of
+  every row by reflection and was mutation-checked by taking a column back out;
+  `TestEveryMigratedColumnIsAlsoDeclared` fails when a column reaches the
+  database through the migration list alone.
+- **Two things can reach an export, and both are decisions.** A project no rule
+  names keeps `basename(cwd)`, which is a directory name; the export prints it,
+  because it is the name that project has everywhere else and an export that
+  renamed it would be a different document about the same day. And a subject
+  with no name of its own takes it from the first capture group of its
+  expression — a piece of text off a page title, a branch or a path, which is
+  the exception that carries the most. `fallback: none` or a rule removes the
+  first; naming the subject removes the second. Both are pinned by a test, so
+  they stay decisions rather than becoming oversights.
+- **A frozen day and a live one can disagree, and only `config_hash` says so.**
+  `spoor confirm --list` prints which days the rules have moved under;
+  `spoor report --day=D --recompute` shows what they would say now without
+  writing anything. The two flags are on different commands.
+
+## Next: closing the holes with more sources
+
+git and file modification times, in that order. git earns its place through
+attribution rather than hours — a commit is a point in time, not an interval —
+and the measurements say the two together add less than the browser did, which
+is why they come after it rather than before.
+
+Two things from this stage want a week of use before anything is built on
+them: whether the queue really shrinks as rules accumulate, and what the pauses
+turn out to be. The second decides whether the screen that asks about them
+stays.

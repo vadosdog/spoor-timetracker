@@ -326,6 +326,18 @@ type Attribution struct {
 	// Entries have the same shape as Keys and Paths below.
 	Never Never `yaml:"never"`
 
+	// Ambiguous lists traces that do name a subject and do not name the same
+	// one twice. The host of an operations console is the measured case: this
+	// time it is checking what you shipped, next time it is a fire in the
+	// middle of something else. No rule separates those; only a person looking
+	// at the day can.
+	//
+	// So the decision recorded here is not a name, it is "no rule can name
+	// this". It is decided once, and after that each *encounter* is a short
+	// question with ready answers — which is a different question, and the
+	// answer to it lives in the day rather than in this file.
+	Ambiguous Ambiguous `yaml:"ambiguous"`
+
 	// Subjects are tried inside every project, after that project's own list.
 	// One line here — an issue key in a page title — covers every tracker,
 	// every repository host and every branch at once.
@@ -362,14 +374,14 @@ type Project struct {
 	//
 	// "~" is the home directory. Nothing else is expanded: a config that
 	// interpolated environment variables would read differently under cron.
-	Paths Strings `yaml:"paths"`
+	Paths Traces `yaml:"paths"`
 
 	// Keys match a browser visit. The key is host[:port][/first-segment] —
 	// exactly what the report prints in its evidence column, so a line of the
 	// report can be pasted here. An entry without a port matches any port, an
 	// entry without a segment matches any segment, and a bare host also
 	// matches its subdomains.
-	Keys Strings `yaml:"keys"`
+	Keys Traces `yaml:"keys"`
 
 	// Branches are regular expressions over the git branch. Useful as a last
 	// resort only: on real data 57% of branches are "HEAD" or "master", which
@@ -405,8 +417,8 @@ type Subject struct {
 	// gives every ticket a subject of its own without listing any of them.
 	Name string `yaml:"name"`
 
-	Paths    Strings `yaml:"paths"`
-	Keys     Strings `yaml:"keys"`
+	Paths    Traces  `yaml:"paths"`
+	Keys     Traces  `yaml:"keys"`
 	Branches Regexps `yaml:"branches"`
 	Titles   Regexps `yaml:"titles"`
 }
@@ -422,8 +434,8 @@ type Subject struct {
 // A path on this list also beats Fallback. Otherwise the guess would name what
 // the list just refused, and the entry would do nothing at all.
 type Never struct {
-	Keys  Strings `yaml:"keys"`
-	Paths Strings `yaml:"paths"`
+	Keys  Traces `yaml:"keys"`
+	Paths Traces `yaml:"paths"`
 }
 
 // UnmarshalYAML accepts the two lists, and also a bare list of keys — which is
@@ -443,7 +455,7 @@ func (n *Never) UnmarshalYAML(node *yaml.Node) error {
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		name, value := node.Content[i], node.Content[i+1]
-		var into *Strings
+		var into *Traces
 		switch name.Value {
 		case "keys":
 			into = &n.Keys
@@ -460,7 +472,7 @@ func (n *Never) UnmarshalYAML(node *yaml.Node) error {
 		}
 		seen[name.Value] = true
 		// A key with no value is an empty list, not a list holding one empty
-		// entry. Decoding null through Strings would produce the latter, and
+		// entry. Decoding null through Traces would produce the latter, and
 		// then every run would warn about a rule nobody wrote.
 		if value.Tag == "!!null" {
 			continue
@@ -471,6 +483,80 @@ func (n *Never) UnmarshalYAML(node *yaml.Node) error {
 	}
 	return nil
 }
+
+// Ambiguous is the traces whose subject changes from visit to visit, and the
+// threshold under which a visit is not a distraction at all.
+//
+// It sits beside Never rather than inside a project because it is the same
+// kind of statement — "I have decided about this trace" — and the two
+// decisions differ only in what was decided. Never says the trace names no
+// project. This says the trace names a subject, just never the same one.
+type Ambiguous struct {
+	// MinSplit is how long an encounter has to be before it is worth asking
+	// about. Below it the time stays with the subject the person was on
+	// either side: a two minute look at a dashboard in the middle of an hour's
+	// work is not a distraction, it is that hour.
+	//
+	// A pointer, because 0 has to mean zero — "ask me about every one of
+	// them" — rather than "use the default", exactly as with head and tail.
+	// The default under it is one person's measurement of their own days:
+	// 53 such stretches over a fortnight, median five minutes.
+	MinSplit *Duration `yaml:"min_split"`
+
+	Keys  Traces `yaml:"keys"`
+	Paths Traces `yaml:"paths"`
+}
+
+// UnmarshalYAML walks the mapping by hand, for the two reasons Never does:
+// Node.Decode does not carry KnownFields, so a misspelt key would be ignored in
+// silence, and a key written with nothing under it has to be an empty list
+// rather than a list holding one empty entry — which would make every run warn
+// about a rule nobody wrote.
+func (a *Ambiguous) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: want a mapping of \"min_split\", \"keys\" and \"paths\"", node.Line)
+	}
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		name, value := node.Content[i], node.Content[i+1]
+		if seen[name.Value] {
+			return fmt.Errorf("line %d: %q is given twice under ambiguous", name.Line, name.Value)
+		}
+		seen[name.Value] = true
+		if value.Tag == "!!null" {
+			continue
+		}
+		switch name.Value {
+		case "min_split":
+			var d Duration
+			if err := d.UnmarshalYAML(value); err != nil {
+				return err
+			}
+			a.MinSplit = &d
+		case "keys":
+			if err := a.Keys.UnmarshalYAML(value); err != nil {
+				return err
+			}
+		case "paths":
+			if err := a.Paths.UnmarshalYAML(value); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf(
+				"line %d: no such key %q under ambiguous; there are \"min_split\", \"keys\" and \"paths\"",
+				name.Line, name.Value)
+		}
+	}
+	return nil
+}
+
+// DefaultMinSplit is the threshold under which an encounter with an ambiguous
+// trace is not asked about. See Ambiguous.MinSplit for where the number comes
+// from and why it is somebody's measurement rather than a constant.
+const DefaultMinSplit = 5 * time.Minute
+
+// Split returns the threshold, or the default when the key was left out.
+func (a Ambiguous) Split() time.Duration { return a.MinSplit.OrDefault(DefaultMinSplit) }
 
 // Fallback is what an unmatched Claude Code event keeps.
 type Fallback string
@@ -509,9 +595,133 @@ func (f Fallback) Or(def Fallback) Fallback {
 	return f
 }
 
-// Strings is a list that may be written as one value. Most rules have exactly
-// one path or one key, and "paths: ~/src/thing" reads better than a sequence
-// of one — which matters when the whole file is meant to be twenty lines.
+// Date is a day written the way a person writes one: 2026-09-10. The zero
+// value means "no date", which is what almost every rule has.
+//
+// Local midnight, like every other day boundary in spoor. A rule that starts
+// "on the tenth" starts when the tenth starts where the person is, not eight
+// hours earlier.
+type Date struct{ time.Time }
+
+// UnmarshalYAML reads the day off the node itself rather than through Decode.
+// yaml.v3 resolves a bare 2026-09-10 to a timestamp, so decoding into a string
+// fails and decoding into a time.Time succeeds while quietly accepting
+// "2026-09-10T14:00:00Z" as well — and a rule that starts at two in the
+// afternoon is not a thing this file can express.
+func (d *Date) UnmarshalYAML(node *yaml.Node) error {
+	t, err := time.ParseInLocation(time.DateOnly, node.Value, time.Local)
+	if err != nil {
+		return fmt.Errorf("line %d: %q is not a day like \"2026-09-10\"", node.Line, node.Value)
+	}
+	d.Time = t
+	return nil
+}
+
+// Trace is one thing a rule matches on — a directory, a browser key — and,
+// optionally, the day the rule starts applying.
+//
+// Since exists because rules change over time and the change has a date. The
+// same directory was one project six months ago and is another one now, and a
+// dictionary with no way to say that is a dictionary that lies about the past
+// every time it is corrected: rules run when the report is built (rules run when a report is built), so a
+// line added today renames a year of history. Which is right when the name was
+// always wrong, and wrong when the name changed.
+//
+// Written either way round:
+//
+//	paths: ~/src/thing
+//	paths:
+//	  - ~/src/thing
+//	  - {value: ~/src/other, since: 2026-09-10}
+//
+// A dated rule beats an undated one of the same specificity, and between two
+// dated ones the later start wins. So "this directory is X, and Y from the
+// tenth" is two entries and needs no end date on the first.
+type Trace struct {
+	Value string `yaml:"value"`
+	Since Date   `yaml:"since"`
+}
+
+// UnmarshalYAML accepts the bare value or the mapping.
+func (t *Trace) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		return node.Decode(&t.Value)
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: want a value, or a mapping of \"value\" and \"since\"", node.Line)
+	}
+	type plain Trace // no recursion back into this method
+	var p plain
+	if err := decodeStrictly(node, &p); err != nil {
+		return err
+	}
+	if p.Value == "" {
+		return fmt.Errorf("line %d: has no \"value\" to match on", node.Line)
+	}
+	*t = Trace(p)
+	return nil
+}
+
+// Traces is a list of them, which may be written as one value.  Most rules
+// have exactly one path or one key, and "paths: ~/src/thing" reads better than
+// a sequence of one — which matters when the whole file is meant to be twenty
+// lines.
+type Traces []Trace
+
+// UnmarshalYAML accepts one entry or a sequence of them.
+func (ts *Traces) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.SequenceNode {
+		var one Trace
+		if err := one.UnmarshalYAML(node); err != nil {
+			return err
+		}
+		*ts = Traces{one}
+		return nil
+	}
+	out := make(Traces, 0, len(node.Content))
+	for _, item := range node.Content {
+		var one Trace
+		if err := one.UnmarshalYAML(item); err != nil {
+			return err
+		}
+		out = append(out, one)
+	}
+	*ts = out
+	return nil
+}
+
+// Values is the traces as plain strings, for the places that only need what
+// was written.
+func (ts Traces) Values() []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.Value)
+	}
+	return out
+}
+
+// decodeStrictly is Node.Decode with unknown keys refused. Node.Decode does
+// not carry the outer decoder's KnownFields setting, so a misspelling of the key
+// inside a mapping would otherwise be ignored in silence — in a file whose
+// whole promise is that a line either works or says why not.
+func decodeStrictly(node *yaml.Node, into any) error {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	if err := enc.Encode(node); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(&buf)
+	dec.KnownFields(true)
+	if err := dec.Decode(into); err != nil {
+		return fmt.Errorf("line %d: %w", node.Line, err)
+	}
+	return nil
+}
+
+// Strings is a list that may be written as one value.
 type Strings []string
 
 // UnmarshalYAML accepts a scalar or a sequence.
@@ -535,13 +745,35 @@ func (s *Strings) UnmarshalYAML(node *yaml.Node) error {
 // Regexp is a regular expression compiled while the config is read, so that a
 // broken one is a config error naming its line rather than a rule that
 // silently matches nothing.
-type Regexp struct{ *regexp.Regexp }
+//
+// Since is the day the rule starts applying, and means what it means on a
+// Trace: nothing, unless it was written.
+type Regexp struct {
+	*regexp.Regexp
+	Since Date
+}
 
-// UnmarshalYAML compiles the expression.
+// UnmarshalYAML compiles the expression. It takes the bare expression or the
+// same mapping a Trace takes, so that a dated rule looks the same whichever of
+// the four kinds it is written on.
 func (r *Regexp) UnmarshalYAML(node *yaml.Node) error {
 	var s string
-	if err := node.Decode(&s); err != nil {
-		return fmt.Errorf("line %d: want a regular expression, got %s", node.Line, node.Tag)
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if err := node.Decode(&s); err != nil {
+			return fmt.Errorf("line %d: want a regular expression, got %s", node.Line, node.Tag)
+		}
+	case yaml.MappingNode:
+		var p struct {
+			Value string `yaml:"value"`
+			Since Date   `yaml:"since"`
+		}
+		if err := decodeStrictly(node, &p); err != nil {
+			return err
+		}
+		s, r.Since = p.Value, p.Since
+	default:
+		return fmt.Errorf("line %d: want a regular expression, or a mapping of \"value\" and \"since\"", node.Line)
 	}
 	re, err := regexp.Compile(s)
 	if err != nil {
@@ -551,12 +783,12 @@ func (r *Regexp) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Regexps is Strings for expressions: one may be written on its own.
+// Regexps is Traces for expressions: one may be written on its own.
 type Regexps []Regexp
 
-// UnmarshalYAML accepts a scalar or a sequence.
+// UnmarshalYAML accepts one expression or a sequence of them.
 func (r *Regexps) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind == yaml.ScalarNode {
+	if node.Kind != yaml.SequenceNode {
 		var one Regexp
 		if err := one.UnmarshalYAML(node); err != nil {
 			return err
@@ -564,11 +796,15 @@ func (r *Regexps) UnmarshalYAML(node *yaml.Node) error {
 		*r = Regexps{one}
 		return nil
 	}
-	var many []Regexp
-	if err := node.Decode(&many); err != nil {
-		return err
+	out := make(Regexps, 0, len(node.Content))
+	for _, item := range node.Content {
+		var one Regexp
+		if err := one.UnmarshalYAML(item); err != nil {
+			return err
+		}
+		out = append(out, one)
 	}
-	*r = many
+	*r = out
 	return nil
 }
 

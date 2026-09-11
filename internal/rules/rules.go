@@ -27,7 +27,10 @@ package rules
 import (
 	"fmt"
 	"path"
+	"slices"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/vadosdog/spoor-timetracker/internal/config"
 	"github.com/vadosdog/spoor-timetracker/internal/event"
@@ -42,8 +45,13 @@ type Rules struct {
 	projects []project
 	subjects []subject // tried inside every project, after its own
 	never    never
-	fallback config.Fallback
-	work     map[string]bool
+	// ambiguous is the other kind of decision about a trace: it does name a
+	// subject, and never the same one twice, so no rule may try. Kept beside
+	// never because both are "I have looked at this and decided", and both
+	// therefore count as covered.
+	ambiguous never
+	fallback  config.Fallback
+	work      map[string]bool
 }
 
 // never is the traces that name nothing: a host that serves every project at
@@ -82,8 +90,11 @@ type Problem struct {
 func projectOwner(name string) string { return fmt.Sprintf("project %q", name) }
 
 // neverOwner is the third place a rule can be written, and it has no name to
-// quote — there is one never list.
-const neverOwner = "the never list"
+// quote — there is one never list. ambiguousOwner is the fourth.
+const (
+	neverOwner     = "the never list"
+	ambiguousOwner = "the ambiguous list"
+)
 
 func subjectOwner(name, project string) string {
 	owner := "a subject named by a capture group"
@@ -106,27 +117,8 @@ func New(cfg config.Attribution) (*Rules, []Problem) {
 	}
 	var problems []Problem
 
-	for _, entry := range cfg.Never.Keys {
-		k, err := parseKey(entry)
-		if err != nil {
-			problems = append(problems, Problem{entry, fmt.Sprintf("%v (in %s)", err, neverOwner)})
-			continue
-		}
-		if p, bad := defaultPortProblem(entry, k, neverOwner); bad {
-			problems = append(problems, p)
-		}
-		r.never.keys = append(r.never.keys, k)
-	}
-	for _, entry := range cfg.Never.Paths {
-		p, err := parsePath(entry)
-		if err != nil {
-			problems = append(problems, Problem{entry, fmt.Sprintf("%v (in %s)", err, neverOwner)})
-			continue
-		}
-		// The one directory written, not the tree under it. See pathPattern.
-		p.subtree = false
-		r.never.paths = append(r.never.paths, p)
-	}
+	r.never, problems = compileNever(cfg.Never.Keys, cfg.Never.Paths, neverOwner, problems)
+	r.ambiguous, problems = compileNever(cfg.Ambiguous.Keys, cfg.Ambiguous.Paths, ambiguousOwner, problems)
 
 	r.subjects, problems = compileSubjects("", cfg.Subjects, problems)
 
@@ -178,14 +170,17 @@ func shadowed(r *Rules) []Problem {
 				// matches too, and the silence scores at least as high. With a
 				// prefix relation that can only happen when the two are the
 				// same, and only a glob silence reaches past its own directory.
-				if n.glob && n.prefix == rule.prefix {
+				// And in force wherever the rule would be: a silence that
+				// starts later than the rule leaves the rule working until
+				// then, so calling it dead would be a false alarm.
+				if n.glob && n.prefix == rule.prefix && sameStart(n.since, rule.since) {
 					say(owner, rule.entry, n.entry)
 				}
 			}
 		}
 		for _, rule := range m.keys {
 			for _, n := range r.never.keys {
-				if n.covers(rule) && n.length >= rule.length {
+				if n.covers(rule) && n.length >= rule.length && sameStart(n.since, rule.since) {
 					say(owner, rule.entry, n.entry)
 				}
 			}
@@ -206,6 +201,23 @@ func shadowed(r *Rules) []Problem {
 	}
 	subjects("", r.subjects)
 	return problems
+}
+
+// sameStart reports whether two rules of equal specificity come into force at
+// the same moment, which is the only case where one of them can be completely
+// dead.
+//
+// Work it through. A refusal beats a rule of equal specificity unless the rule
+// starts later — see the score type. So where the rule starts later it always wins once it
+// applies, and where the refusal starts later the rule fires until then. Only
+// when the two start together does the refusal cover every moment the rule
+// could ever have had — and that is the case worth a warning, because a
+// warning that fires on the other two is a warning people stop reading.
+func sameStart(a, b config.Date) bool {
+	if a.IsZero() || b.IsZero() {
+		return a.IsZero() && b.IsZero()
+	}
+	return a.Equal(b.Time)
 }
 
 // covers reports whether every visit k matches, other matches too.
@@ -253,9 +265,14 @@ func compileSubjects(project string, list []config.Subject, problems []Problem) 
 // that project. Either can come back empty, and empty is a real answer — the
 // report has a row for time no rule could name, and inventing a project for a
 // search engine would be worse than leaving it there.
-func (r *Rules) Resolve(e event.Event) (project, subject string) {
+//
+// byRule is what the name rests on: a line somebody wrote, or the guess the
+// source made from the working directory. The two look identical in a report
+// and are not the same claim at all, which is what `report --unmatched` exists
+// to say and what the confirmed day records per stretch.
+func (r *Rules) Resolve(e event.Event) (project, subject string, byRule bool) {
 	if r == nil {
-		return e.Project, ""
+		return e.Project, "", false
 	}
 	t := targetOf(e)
 
@@ -268,32 +285,32 @@ func (r *Rules) Resolve(e event.Event) (project, subject string) {
 	// specific disagrees. Two things follow, and both are needed. A rule
 	// reading the page title or the branch still applies, which is what lets an
 	// issue tracker be recognised without an API. And a longer path or key
-	// still wins: silencing /home/you must not take away the rule on the one
+	// still wins: silencing /home/u must not take away the rule on the one
 	// checkout inside it, or the entry would be a foot-gun rather than a
 	// decision.
 	for _, k := range r.never.keys {
-		if score := k.match(t); score > t.minKey {
-			t.minKey = score
+		if s := k.match(t); s.hit() && s.beats(t.minKey) {
+			t.minKey = s
 		}
 	}
 	for _, p := range r.never.paths {
-		if score := p.match(t); score > t.minPath {
-			t.minPath = score
+		if s := p.match(t); s.hit() && s.beats(t.minPath) {
+			t.minPath = s
 		}
 	}
 	// A silenced directory also beats the fallback. Refusing to let a path name
 	// a project and then letting the last element of that same path name it
 	// anyway would leave the entry doing nothing at all.
-	silenced := t.minPath > 0
+	silenced := t.minPath.hit()
 
-	best, bestScore := -1, 0
+	best, bestScore := -1, zero
 	for i := range r.projects {
-		if score, _ := r.projects[i].match(t); score > bestScore {
-			best, bestScore = i, score
+		if s, _ := r.projects[i].match(t); s.hit() && s.beats(bestScore) {
+			best, bestScore = i, s
 		}
 	}
 	if best >= 0 {
-		return r.projects[best].name, pick(t, r.projects[best].subjects, r.subjects)
+		return r.projects[best].name, pick(t, r.projects[best].subjects, r.subjects), true
 	}
 	// Nothing matched. A Claude Code event keeps the name its working directory
 	// gave it at import time unless the config says otherwise; a browser visit
@@ -301,17 +318,17 @@ func (r *Rules) Resolve(e event.Event) (project, subject string) {
 	if r.fallback == config.FallbackCWDBasename && !silenced {
 		project = e.Project
 	}
-	return project, pick(t, nil, r.subjects)
+	return project, pick(t, nil, r.subjects), false
 }
 
 // pick is the subject: the project's own rules first, then the ones that apply
 // inside every project. Most specific wins, and the order written breaks a tie.
 func pick(t target, own, global []subject) string {
-	best, bestScore := "", 0
+	best, bestScore := "", zero
 	for _, list := range [][]subject{own, global} {
 		for _, s := range list {
-			score, capture := s.match(t)
-			if score <= bestScore {
+			got, capture := s.match(t)
+			if !got.hit() || !got.beats(bestScore) {
 				continue
 			}
 			name := s.name
@@ -321,7 +338,7 @@ func pick(t target, own, global []subject) string {
 			if name == "" {
 				continue
 			}
-			best, bestScore = name, score
+			best, bestScore = name, got
 		}
 		// A project's own subjects win over the global ones outright rather
 		// than on specificity: a rule written inside a project was written
@@ -347,21 +364,201 @@ func (r *Rules) Covers(e event.Event) bool {
 	}
 	t := targetOf(e)
 	for _, k := range r.never.keys {
-		if k.match(t) > 0 {
+		if k.match(t).hit() {
 			return true
 		}
 	}
 	for _, p := range r.never.paths {
-		if p.match(t) > 0 {
+		if p.match(t).hit() {
+			return true
+		}
+	}
+	// A trace decided to be ambiguous is decided about: the answer was "no
+	// rule can name the subject here", which is a decision and not a gap. It
+	// must not keep coming back up as a line somebody has yet to write.
+	for _, k := range r.ambiguous.keys {
+		if k.match(t).hit() {
+			return true
+		}
+	}
+	for _, p := range r.ambiguous.paths {
+		if p.match(t).hit() {
 			return true
 		}
 	}
 	for i := range r.projects {
-		if score, _ := r.projects[i].match(t); score > 0 {
+		if s, _ := r.projects[i].match(t); s.hit() {
 			return true
 		}
 	}
 	return false
+}
+
+// Ambiguous says whether this event's trace was decided to be one no rule can
+// name a subject for. The second value is the trace that says so, in the form
+// it stands in the config — which is what the question about one encounter is
+// headed with.
+func (r *Rules) Ambiguous(e event.Event) (bool, string) {
+	if r == nil {
+		return false, ""
+	}
+	t := targetOf(e)
+	// Path first, then key, which is the order of the ladder everywhere else.
+	for _, p := range r.ambiguous.paths {
+		if p.match(t).hit() {
+			return true, "path:" + p.entry
+		}
+	}
+	for _, k := range r.ambiguous.keys {
+		if k.match(t).hit() {
+			return true, "key:" + k.entry
+		}
+	}
+	return false, ""
+}
+
+// Refuses says whether a never entry already covers a trace at least as
+// specifically as a rule written on it would be — which makes that rule one
+// that can never fire. The answer is the entry, so the message can name it.
+//
+// It is asked before a rule is written rather than found afterwards by a row
+// that never appears: a rule written in silence that does nothing is the worst
+// outcome there is, because whoever wrote it is now sure the question is shut.
+//
+// The start date is part of the answer. A dated rule beats an undated refusal
+// of the same specificity — that is the whole of the tie-break on a start date — so warning about one
+// would be a false alarm, and a warning people learn to ignore is worse than
+// no warning at all.
+func (r *Rules) Refuses(kind, value string, since config.Date) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	switch kind {
+	case "path":
+		want, err := parsePath(config.Trace{Value: value, Since: since})
+		if err != nil {
+			return "", false
+		}
+		for _, n := range r.never.paths {
+			if n.glob && n.prefix == want.prefix && sameStart(n.since, want.since) {
+				return n.entry, true
+			}
+		}
+	case "key":
+		want, err := parseKey(config.Trace{Value: value, Since: since})
+		if err != nil {
+			return "", false
+		}
+		for _, n := range r.never.keys {
+			if n.covers(want) && n.length >= want.length && sameStart(n.since, want.since) {
+				return n.entry, true
+			}
+		}
+	}
+	return "", false
+}
+
+// NamesTrace says which project a trace resolves to on its own, with no block
+// around it to lend it a name.
+//
+// It answers one question, and that question is load-bearing: a rule written
+// under a subject does nothing at all unless the *project* also names the
+// trace. Subjects are only consulted once a project has matched, so a key
+// filed under projects[X].subjects[Y] and nowhere else names neither — the
+// event falls through to the fallback and the question comes back tomorrow,
+// and the day after, looking exactly like a mechanism that is broken.
+func (r *Rules) NamesTrace(kind, value string, at time.Time) string {
+	if r == nil {
+		return ""
+	}
+	t := target{at: at}
+	switch kind {
+	case "path":
+		p, err := parsePath(config.Trace{Value: value})
+		if err != nil {
+			return ""
+		}
+		t.cwd = p.prefix
+	case "key":
+		k, err := parseKey(config.Trace{Value: value})
+		if err != nil {
+			return ""
+		}
+		t.isBrowser, t.host, t.port, t.segment = true, k.host, k.port, k.segment
+		t.isAddress = k.address
+	default:
+		return ""
+	}
+	best, bestScore := -1, zero
+	for i := range r.projects {
+		if s, _ := r.projects[i].match(t); s.hit() && s.beats(bestScore) {
+			best, bestScore = i, s
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	return r.projects[best].name
+}
+
+// Starts lists the rules whose start date falls inside [from, to).
+//
+// `report` prints a line for each, because a range a dated rule begins inside
+// holds two dictionaries and the table under it looks like one. Without that
+// line the reader sees one table and assumes one dictionary made it.
+func (r *Rules) Starts(from, to time.Time) []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	say := func(owner, entry string, since config.Date) {
+		// Strictly inside. A rule starting on the first day of the range covers
+		// the whole of it, so nothing changes within — and warning about it
+		// would fire on every day somebody wrote a dated rule on, for ever.
+		if since.IsZero() || !since.After(from) || !since.Before(to) {
+			return
+		}
+		out = append(out, fmt.Sprintf("%s: %s from %s",
+			owner, entry, since.Format(time.DateOnly)))
+	}
+	walk := func(owner string, m matcher) {
+		for _, p := range m.paths {
+			say(owner, p.entry, p.since)
+		}
+		for _, k := range m.keys {
+			say(owner, k.entry, k.since)
+		}
+		for _, list := range [][]config.Regexp{m.branches, m.titles} {
+			for _, re := range list {
+				say(owner, re.String(), re.Since)
+			}
+		}
+	}
+	for _, p := range r.projects {
+		walk(projectOwner(p.name), p.matcher)
+		for _, s := range p.subjects {
+			walk(subjectOwner(s.name, p.name), s.matcher)
+		}
+	}
+	for _, s := range r.subjects {
+		walk(subjectOwner(s.name, ""), s.matcher)
+	}
+	for _, list := range []struct {
+		owner string
+		of    never
+	}{{neverOwner, r.never}, {ambiguousOwner, r.ambiguous}} {
+		for _, k := range list.of.keys {
+			say(list.owner, k.entry, k.since)
+		}
+		for _, p := range list.of.paths {
+			say(list.owner, p.entry, p.since)
+		}
+	}
+	sort.Strings(out)
+	// Two rules written identically are one line, not two: the reader is being
+	// told the dictionary changed inside the range, and saying it twice reads
+	// as two changes.
+	return slices.Compact(out)
 }
 
 // Work says whether a project was declared work. The second value is whether it
@@ -387,17 +584,27 @@ type target struct {
 	// isAddress marks a host that is an address literal. An address has no
 	// labels, so no rule may reach it through the subdomain rule.
 	isAddress bool
+	// at is when the event happened, in local time. A rule with a start date
+	// does not apply before it, which is the only thing this is for.
+	at time.Time
 	// minKey and minPath are the scores a rule has to beat to count at all.
 	// A never entry raises the floor for traces of its own kind, so that a
 	// silenced host or directory can still be spoken for by something more
-	// specific — never /home/you does not take away a rule on the checkout
+	// specific — never /home/u does not take away a rule on the checkout
 	// inside it.
-	minKey, minPath int
+	minKey, minPath score
 	title           string
 }
 
+// targetOf takes an event apart into the parts a rule may look at. at is the
+// event's own time in local terms — parsed here rather than passed in, so that
+// every caller of Resolve gets dated rules right without having to know they
+// exist.
 func targetOf(e event.Event) target {
 	t := target{title: e.Title}
+	if ts, err := time.Parse(time.RFC3339, e.TS); err == nil {
+		t.at = ts.Local()
+	}
 	switch e.Source {
 	case claudecode.SourceName:
 		t.cwd = strings.TrimRight(e.CWD, "/")
@@ -442,6 +649,57 @@ func (m matcher) captures() bool {
 	return false
 }
 
+// score is how specific a match is.
+//
+// Two numbers rather than one, because two different things decide between
+// rules and they are not comparable. Specificity comes first: a literal beats
+// an expression, and a longer literal beats a shorter one — where something
+// happened is better evidence than what a piece of text looked like. The start
+// date breaks a tie between rules of equal specificity, and only that.
+//
+// The date is here because a dictionary is not a statement about now, it is a
+// statement about a history that is still being reported on. The same
+// directory was one project in March and another in September, and rules run
+// when the report is built (rules run when a report is built), so a plain correction rewrites the March
+// numbers too. A dated rule leaves them alone.
+//
+// So "this is X, and Y from the tenth" is two entries and needs no end date on
+// the first: from the tenth the dated one wins on the tie-break, before it the
+// dated one does not apply at all.
+type score struct {
+	n int
+	// since is the rule's start date as a Unix second, or 0 for an undated
+	// rule. Later beats earlier; an undated rule is the earliest there is.
+	since int64
+}
+
+// zero is what "no match" is.
+var zero = score{}
+
+func (s score) hit() bool { return s.n > 0 }
+
+// beats is the whole order between two matching rules.
+func (s score) beats(o score) bool {
+	if s.n != o.n {
+		return s.n > o.n
+	}
+	return s.since > o.since
+}
+
+// dated turns a start date into the tie-break half of a score.
+func dated(since config.Date) int64 {
+	if since.IsZero() {
+		return 0
+	}
+	return since.Unix()
+}
+
+// started reports whether a rule dated since is in force at the moment at.
+// An undated rule always is; a dated one is not, before its day.
+func started(since config.Date, at time.Time) bool {
+	return since.IsZero() || !at.Before(since.Time)
+}
+
 // literalScore lifts a literal match above every expression match. A directory
 // and a browser key say where something happened; an expression says what a
 // piece of text looked like, and where beats what. Above that, the longer
@@ -452,11 +710,11 @@ const literalScore = 1 << 20
 // match returns how specific the match is, and the first capture group of the
 // expression that produced it. A score of zero means no match; the capture is
 // empty unless an expression matched and had a group.
-func (m matcher) match(t target) (int, string) {
-	score, capture := 0, ""
-	better := func(s int, c string) {
-		if s > score {
-			score, capture = s, c
+func (m matcher) match(t target) (score, string) {
+	best, capture := zero, ""
+	better := func(s score, c string) {
+		if s.hit() && s.beats(best) {
+			best, capture = s, c
 		}
 	}
 	for _, p := range m.paths {
@@ -467,33 +725,37 @@ func (m matcher) match(t target) (int, string) {
 	}
 	if t.branch != "" {
 		for _, re := range m.branches {
-			if s, c, ok := matchRegexp(re, t.branch); ok {
+			if s, c, ok := matchRegexp(re, t.branch, t.at); ok {
 				better(s, c)
 			}
 		}
 	}
 	if t.title != "" {
 		for _, re := range m.titles {
-			if s, c, ok := matchRegexp(re, t.title); ok {
+			if s, c, ok := matchRegexp(re, t.title, t.at); ok {
 				better(s, c)
 			}
 		}
 	}
-	return score, capture
+	return best, capture
 }
 
 // matchRegexp scores an expression match. Every expression scores the same:
 // there is no honest way to say one pattern is more specific than another, so
 // the order they are written in decides between them.
-func matchRegexp(re config.Regexp, s string) (int, string, bool) {
+func matchRegexp(re config.Regexp, s string, at time.Time) (score, string, bool) {
+	if !started(re.Since, at) {
+		return zero, "", false
+	}
 	found := re.FindStringSubmatch(s)
 	if found == nil {
-		return 0, "", false
+		return zero, "", false
 	}
+	got := score{n: 1, since: dated(re.Since)}
 	if len(found) > 1 {
-		return 1, found[1], true
+		return got, found[1], true
 	}
-	return 1, "", true
+	return got, "", true
 }
 
 // pathPattern matches the working directory of a Claude Code event.
@@ -521,10 +783,13 @@ type pathPattern struct {
 	// "*" is a plain string prefix here as everywhere else, and "/x*" would
 	// take "/xylophone" with it.
 	subtree bool
+	// since is the day this rule starts applying. Zero for almost every rule.
+	since config.Date
 }
 
-func parsePath(entry string) (pathPattern, error) {
-	p := pathPattern{entry: entry, prefix: entry, subtree: true}
+func parsePath(t config.Trace) (pathPattern, error) {
+	entry := t.Value
+	p := pathPattern{entry: entry, prefix: entry, subtree: true, since: t.Since}
 	if strings.HasSuffix(p.prefix, "*") {
 		p.glob = true
 		p.prefix = strings.TrimSuffix(p.prefix, "*")
@@ -546,26 +811,27 @@ func parsePath(entry string) (pathPattern, error) {
 	return p, nil
 }
 
-func (p pathPattern) match(t target) int {
-	if t.cwd == "" {
-		return 0
+func (p pathPattern) match(t target) score {
+	if t.cwd == "" || !started(p.since, t.at) {
+		return zero
 	}
+	s := score{n: literalScore + len(p.prefix), since: dated(p.since)}
 	if p.glob {
-		if strings.HasPrefix(t.cwd, p.prefix) && literalScore+len(p.prefix) > t.minPath {
-			return literalScore + len(p.prefix)
+		if strings.HasPrefix(t.cwd, p.prefix) && s.beats(t.minPath) {
+			return s
 		}
-		return 0
+		return zero
 	}
 	// The directory itself, or anything under it. Testing for the separator
 	// rather than for the string is what keeps /src/thing from swallowing
 	// /src/thing-other, which is a different project with a similar name.
-	if p.subtree && strings.HasPrefix(t.cwd, p.prefix+"/") && literalScore+len(p.prefix) > t.minPath {
-		return literalScore + len(p.prefix)
+	if p.subtree && strings.HasPrefix(t.cwd, p.prefix+"/") && s.beats(t.minPath) {
+		return s
 	}
-	if t.cwd == p.prefix && literalScore+len(p.prefix) > t.minPath {
-		return literalScore + len(p.prefix)
+	if t.cwd == p.prefix && s.beats(t.minPath) {
+		return s
 	}
-	return 0
+	return zero
 }
 
 // keyPattern matches a browser visit by host, port and first path segment —
@@ -585,10 +851,13 @@ type keyPattern struct {
 	// length is what the entry was written as, which is what decides between
 	// two matching entries: example.com/issues over example.com.
 	length int
+	// since is the day this rule starts applying. Zero for almost every rule.
+	since config.Date
 }
 
-func parseKey(entry string) (keyPattern, error) {
-	k := keyPattern{entry: entry, length: len(entry)}
+func parseKey(t config.Trace) (keyPattern, error) {
+	entry := t.Value
+	k := keyPattern{entry: entry, length: len(entry), since: t.Since}
 	rest := entry
 	if strings.Contains(rest, "://") {
 		return keyPattern{}, fmt.Errorf("looks like a URL; write host[:port][/first-segment], as the report prints it")
@@ -700,9 +969,9 @@ func isDigits(s string) bool {
 	return true
 }
 
-func (k keyPattern) match(t target) int {
-	if !t.isBrowser {
-		return 0
+func (k keyPattern) match(t target) score {
+	if !t.isBrowser || !started(k.since, t.at) {
+		return zero
 	}
 	// A bare host covers its subdomains, the way the browser ignore list does:
 	// one instance serving a dozen projects is still one instance, and nobody
@@ -718,32 +987,63 @@ func (k keyPattern) match(t target) int {
 	switch {
 	case t.host == k.host:
 	case k.address || t.isAddress:
-		return 0
+		return zero
 	case !strings.HasSuffix(t.host, "."+k.host):
-		return 0
+		return zero
 	}
 	// A port or a segment left out matches any. Written out, it has to be the
 	// one: localhost:3000 and localhost:5173 are two dev servers, and telling
 	// them apart is the reason the port is stored at all.
 	if k.port != "" && k.port != t.port {
-		return 0
+		return zero
 	}
 	if k.segment != "" && k.segment != t.segment {
-		return 0
+		return zero
 	}
-	if literalScore+k.length <= t.minKey {
-		return 0
+	s := score{n: literalScore + k.length, since: dated(k.since)}
+	if !s.beats(t.minKey) {
+		return zero
 	}
-	return literalScore + k.length
+	return s
 }
 
-func compileMatcher(owner string, paths, keys config.Strings, branches, titles config.Regexps) (matcher, []Problem) {
+// compileNever builds one of the two lists of decided-about traces. Both are
+// compiled here rather than each in its own loop, because they are the same
+// thing said about a different question and a second copy is how the two
+// silently stop behaving alike.
+func compileNever(keys, paths config.Traces, owner string, problems []Problem) (never, []Problem) {
+	var n never
+	for _, entry := range keys {
+		k, err := parseKey(entry)
+		if err != nil {
+			problems = append(problems, Problem{entry.Value, fmt.Sprintf("%v (in %s)", err, owner)})
+			continue
+		}
+		if p, bad := defaultPortProblem(entry.Value, k, owner); bad {
+			problems = append(problems, p)
+		}
+		n.keys = append(n.keys, k)
+	}
+	for _, entry := range paths {
+		p, err := parsePath(entry)
+		if err != nil {
+			problems = append(problems, Problem{entry.Value, fmt.Sprintf("%v (in %s)", err, owner)})
+			continue
+		}
+		// The one directory written, not the tree under it. See pathPattern.
+		p.subtree = false
+		n.paths = append(n.paths, p)
+	}
+	return n, problems
+}
+
+func compileMatcher(owner string, paths, keys config.Traces, branches, titles config.Regexps) (matcher, []Problem) {
 	var m matcher
 	var problems []Problem
 	for _, entry := range paths {
 		p, err := parsePath(entry)
 		if err != nil {
-			problems = append(problems, Problem{entry, fmt.Sprintf("%v (in %s)", err, owner)})
+			problems = append(problems, Problem{entry.Value, fmt.Sprintf("%v (in %s)", err, owner)})
 			continue
 		}
 		m.paths = append(m.paths, p)
@@ -751,10 +1051,10 @@ func compileMatcher(owner string, paths, keys config.Strings, branches, titles c
 	for _, entry := range keys {
 		k, err := parseKey(entry)
 		if err != nil {
-			problems = append(problems, Problem{entry, fmt.Sprintf("%v (in %s)", err, owner)})
+			problems = append(problems, Problem{entry.Value, fmt.Sprintf("%v (in %s)", err, owner)})
 			continue
 		}
-		if p, bad := defaultPortProblem(entry, k, owner); bad {
+		if p, bad := defaultPortProblem(entry.Value, k, owner); bad {
 			problems = append(problems, p)
 		}
 		m.keys = append(m.keys, k)

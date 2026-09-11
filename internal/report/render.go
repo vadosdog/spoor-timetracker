@@ -46,6 +46,12 @@ const unnamedLabel = "(no project)"
 // as a measurement.
 const backgroundLabel = "agent worked in the background"
 
+// claimedLabel names time between blocks that a person said was work. Neutral
+// and explicit about whose claim it is: nothing on this machine measured it,
+// and the difference between "the tool found this" and "you said this" is the
+// one a report must never blur.
+const claimedLabel = "pauses you called work"
+
 // RenderTable writes the report as a table for a terminal.
 func RenderTable(w io.Writer, r Report) error {
 	b := &strings.Builder{}
@@ -269,6 +275,15 @@ func writeSummary(b *strings.Builder, r Report) {
 			"summed per project — two agents can be busy in the same second, so this is not part of the day")
 	}
 	fmt.Fprintf(tw, "active\t%s\t%s\n", hm(t.Active), coverage(t))
+	// A pause somebody said was work. Its own line, never added in, for
+	// exactly the reason the background line has one: the day measured nothing
+	// there, and one number made of a measurement and an answer is a number
+	// nobody can check.
+	if t.Claimed > 0 {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", claimedLabel, hm(t.Claimed),
+			"between blocks, where nothing was recorded — not part of active; "+
+				"see --json for which project each went to")
+	}
 	if t.OneNeighbour > 0 {
 		fmt.Fprintf(tw, "of which named by one neighbour\t%s\t%s\n", hm(t.OneNeighbour),
 			"a block with no project of its own — browsing, or a meeting — with a named block on one side only")
@@ -541,6 +556,10 @@ func writeTimeline(b *strings.Builder, days []Day) {
 		for _, run := range d.Runs {
 			name := run.Project
 			switch {
+			case run.Gap && run.Claimed:
+				// Still nothing was recorded here. What changed is that
+				// somebody said what it was, and the schedule says who said it.
+				name = "— you called this work —"
 			case run.Gap:
 				name = "— nothing —"
 			case name == Unnamed:
@@ -589,7 +608,14 @@ func runGrounds(run Run) string {
 // true and only one is useful — "0:00" next to a time range that plainly is
 // not empty reads as a bug, and rounding it up to "0:01" would be the thing
 // this function exists not to do.
-func hm(d time.Duration) string {
+func hm(d time.Duration) string { return HM(d) }
+
+// HM is that formatter, for everything outside this package that prints a
+// length: the export, the confirmation screens and the queue. It is exported
+// rather than copied because it was copied, four times, and every copy lost
+// both guards — so a project with forty seconds read "<1m" in the report and
+// "0:00" everywhere else, and "0:00" is a measured nothing.
+func HM(d time.Duration) string {
 	switch {
 	case d <= 0:
 		return "-"
@@ -669,6 +695,7 @@ func RenderJSON(w io.Writer, r Report) error {
 				To:           run.To.Format(time.RFC3339),
 				Project:      run.Project,
 				Gap:          run.Gap,
+				Claimed:      run.Claimed,
 				Attention:    hm(run.Attention),
 				AttentionMS:  ms(run.Attention),
 				Background:   hm(run.Background),
@@ -722,6 +749,7 @@ func jsonSubjectReportOf(r Report) jsonSubjectReport {
 		counted += s.Background
 	}
 	out.Counted, out.CountedMS = hm(counted), ms(counted)
+	out.Claimed, out.ClaimedMS = hm(s.Claimed), ms(s.Claimed)
 	if len(s.Days) > 0 {
 		out.Subject = s.Name
 		out.First = s.First.Format(time.DateOnly)
@@ -735,6 +763,8 @@ func jsonSubjectReportOf(r Report) jsonSubjectReport {
 			AttentionMS:  ms(p.Attention),
 			Background:   hm(p.Background),
 			BackgroundMS: ms(p.Background),
+			Claimed:      hm(p.Claimed),
+			ClaimedMS:    ms(p.Claimed),
 			Agent:        hm(0),
 			Wall:         hm(0),
 			Events:       p.Events,
@@ -751,6 +781,8 @@ func jsonSubjectReportOf(r Report) jsonSubjectReport {
 			AttentionMS:  ms(d.Attention),
 			Background:   hm(d.Background),
 			BackgroundMS: ms(d.Background),
+			Claimed:      hm(d.Claimed),
+			ClaimedMS:    ms(d.Claimed),
 			Events:       d.Events,
 		})
 	}
@@ -777,6 +809,8 @@ type jsonSubjectReport struct {
 	AttentionMS  int64            `json:"attention_ms"`
 	Background   string           `json:"background"`
 	BackgroundMS int64            `json:"background_ms"`
+	Claimed      string           `json:"claimed_pauses"`
+	ClaimedMS    int64            `json:"claimed_pauses_ms"`
 	Counted      string           `json:"counted"`
 	CountedMS    int64            `json:"counted_ms"`
 	Events       int              `json:"events"`
@@ -822,6 +856,8 @@ type jsonSubjectDay struct {
 	AttentionMS  int64  `json:"attention_ms"`
 	Background   string `json:"background"`
 	BackgroundMS int64  `json:"background_ms"`
+	Claimed      string `json:"claimed_pauses"`
+	ClaimedMS    int64  `json:"claimed_pauses_ms"`
 	Events       int    `json:"events"`
 }
 
@@ -862,6 +898,8 @@ type jsonTotals struct {
 	AgentMS        int64         `json:"agent_ms"`
 	OneNeighbour   string        `json:"one_neighbour"`
 	OneNeighbourMS int64         `json:"one_neighbour_ms"`
+	Claimed        string        `json:"claimed_pauses"`
+	ClaimedMS      int64         `json:"claimed_pauses_ms"`
 	Counted        string        `json:"counted"`
 	CountedMS      int64         `json:"counted_ms"`
 	Projects       []jsonProject `json:"projects"`
@@ -882,6 +920,7 @@ type jsonRun struct {
 	To           string       `json:"to"`
 	Project      string       `json:"project"`
 	Gap          bool         `json:"gap"`
+	Claimed      bool         `json:"claimed,omitempty"`
 	Attention    string       `json:"attention"`
 	AttentionMS  int64        `json:"attention_ms"`
 	Background   string       `json:"background"`
@@ -895,20 +934,24 @@ type jsonProject struct {
 	Project string `json:"project"`
 	// Work is null when the dictionary did not say, which is not the same as
 	// false. Three values on purpose.
-	Work         *bool         `json:"work"`
-	Attention    string        `json:"attention"`
-	AttentionMS  int64         `json:"attention_ms"`
-	Background   string        `json:"background"`
-	BackgroundMS int64         `json:"background_ms"`
-	Agent        string        `json:"agent"`
-	AgentMS      int64         `json:"agent_ms"`
-	Wall         string        `json:"wall"`
-	WallMS       int64         `json:"wall_ms"`
-	Events       int           `json:"events"`
-	Sources      []jsonSource  `json:"sources"`
-	BrowserKeys  []jsonKey     `json:"browser_keys"`
-	Candidates   []string      `json:"neighbour_candidates"`
-	Subjects     []jsonSubject `json:"subjects"`
+	Work         *bool  `json:"work"`
+	Attention    string `json:"attention"`
+	AttentionMS  int64  `json:"attention_ms"`
+	Background   string `json:"background"`
+	BackgroundMS int64  `json:"background_ms"`
+	// Claimed is time between blocks somebody said belonged to this project.
+	// Never part of attention or background: nothing measured it.
+	Claimed     string        `json:"claimed_pauses"`
+	ClaimedMS   int64         `json:"claimed_pauses_ms"`
+	Agent       string        `json:"agent"`
+	AgentMS     int64         `json:"agent_ms"`
+	Wall        string        `json:"wall"`
+	WallMS      int64         `json:"wall_ms"`
+	Events      int           `json:"events"`
+	Sources     []jsonSource  `json:"sources"`
+	BrowserKeys []jsonKey     `json:"browser_keys"`
+	Candidates  []string      `json:"neighbour_candidates"`
+	Subjects    []jsonSubject `json:"subjects"`
 }
 
 // jsonSubject is one accumulating thing inside a project. Its time is part of
@@ -920,8 +963,12 @@ type jsonSubject struct {
 	AttentionMS  int64  `json:"attention_ms"`
 	Background   string `json:"background"`
 	BackgroundMS int64  `json:"background_ms"`
-	Events       int    `json:"events"`
-	Days         int    `json:"days"`
+	// Claimed is time between blocks somebody said belonged to this subject.
+	// Never part of attention or background: nothing measured it.
+	Claimed   string `json:"claimed_pauses"`
+	ClaimedMS int64  `json:"claimed_pauses_ms"`
+	Events    int    `json:"events"`
+	Days      int    `json:"days"`
 }
 
 type jsonSource struct {
@@ -975,6 +1022,8 @@ func jsonTotalsOf(t Totals, o Options) jsonTotals {
 		AgentMS:        ms(t.Agent),
 		OneNeighbour:   hm(t.OneNeighbour),
 		OneNeighbourMS: ms(t.OneNeighbour),
+		Claimed:        hm(t.Claimed),
+		ClaimedMS:      ms(t.Claimed),
 		Counted:        hm(counted),
 		CountedMS:      ms(counted),
 		Projects:       []jsonProject{},
@@ -988,6 +1037,8 @@ func jsonTotalsOf(t Totals, o Options) jsonTotals {
 			AttentionMS:  ms(p.Attention),
 			Background:   hm(p.Background),
 			BackgroundMS: ms(p.Background),
+			Claimed:      hm(p.Claimed),
+			ClaimedMS:    ms(p.Claimed),
 			Agent:        hm(p.Agent),
 			AgentMS:      ms(p.Agent),
 			Wall:         hm(p.Wall),
@@ -1018,6 +1069,8 @@ func jsonSubjects(subjects []Subject) []jsonSubject {
 			AttentionMS:  ms(s.Attention),
 			Background:   hm(s.Background),
 			BackgroundMS: ms(s.Background),
+			Claimed:      hm(s.Claimed),
+			ClaimedMS:    ms(s.Claimed),
 			Events:       s.Events,
 			Days:         s.Days,
 		})

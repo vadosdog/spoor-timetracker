@@ -87,7 +87,12 @@ const Unnamed = ""
 type Attributor interface {
 	// Resolve returns the project and the subject of an event. Both may be
 	// empty: no project is a real answer, and the report has a row for it.
-	Resolve(e event.Event) (project, subject string)
+	//
+	// byRule says whether the project rests on a line somebody wrote or on the
+	// guess the source made from the working directory. The two are printed
+	// identically and are not the same claim, which is what the ground of a
+	// confirmed stretch records and what `report --unmatched` exists to say.
+	Resolve(e event.Event) (project, subject string, byRule bool)
 	// Work says whether a project was declared work rather than personal, and
 	// whether it said anything at all. Undeclared is not personal.
 	Work(project string) (work, declared bool)
@@ -121,7 +126,92 @@ type Options struct {
 	// what is summed, never what is measured: the background line is printed
 	// either way.
 	CountBackground bool
+
+	// Pauses is what a person said about the gaps between blocks: which of
+	// them were work.
+	//
+	// A pause is not active time and does not become any. What it becomes is a
+	// line of its own, exactly as background does — the tool measured the
+	// pause and cannot say what it was, the person can and did, and folding
+	// their answer into the total would make one number out of two different
+	// kinds of knowledge. Whether it is ever summed is a decision that has not
+	// been taken; the line is there so that it can be.
+	Pauses []Pause
+
+	// Manual is what a person said about particular stretches of particular
+	// days, where no rule was written — either because none could be, or
+	// because the correction was meant to be about this day only.
+	//
+	// It is applied here rather than kept for the interface, so that a day
+	// looked at with `report` and a day looked at with `confirm` are the same
+	// day. A flag that changes what the tool believes and not what it prints
+	// would be worse than no flag.
+	Manual []Assignment
 }
+
+// Pause is one gap between blocks, and whether the person said it was work.
+type Pause struct {
+	From, To time.Time
+	Worked   bool
+	// Project and Subject are what it was, when it was work. A pause that can
+	// only be called "work" is a pause nothing can be done with afterwards:
+	// the question people ask is how long something took.
+	Project string
+	Subject string
+}
+
+// Assignment is one thing a person said about one stretch of one day.
+//
+// It never invents time: an interval outside the day's blocks names seconds
+// nothing recorded, and typing intervals by hand is the marking-as-you-go this
+// project exists not to do. What it does is change the answer for time that is
+// already there.
+type Assignment struct {
+	From, To time.Time
+	// Project is what to call it. Empty leaves the project as it was, which
+	// is how "the project is right and the subject is not" is expressed.
+	Project string
+	// Subject is the accumulating thing inside it. Empty leaves it alone;
+	// ClearSubject is how "none of them" is said, since empty already means
+	// something else.
+	Subject      string
+	ClearSubject bool
+	// OneOff marks an answer that could not have become a rule. It is
+	// counted, and the count is printed, because hand marking that nobody can
+	// see is hand marking nobody will ever revisit.
+	OneOff bool
+}
+
+func (a Assignment) ground() Ground {
+	if a.OneOff {
+		return GroundOneOff
+	}
+	return GroundManual
+}
+
+// covering finds the assignment that owns a stretch. The interval boundaries
+// are cut points, so a stretch is inside one or inside none; the test is on the
+// midpoint so that a boundary belongs to exactly one side.
+func covering(list []Assignment, from, to time.Time) (Assignment, bool) {
+	mid := from.Add(to.Sub(from) / 2)
+	for i := len(list) - 1; i >= 0; i-- {
+		// Last one wins: two answers about the same stretch mean somebody
+		// changed their mind, and the later answer is the one they meant.
+		if !mid.Before(list[i].From) && mid.Before(list[i].To) {
+			return list[i], true
+		}
+	}
+	return Assignment{}, false
+}
+
+// Normalise fills in what a zero means, so that a caller storing the settings
+// stores the ones that were in force rather than the ones that were left out.
+//
+// A confirmed day keeps its settings, and "cluster_gap_ms 0" in that row is not
+// a record of anything: for the two thresholds a zero means "use the default",
+// so a person reading the database would read it as a threshold of nothing —
+// which would mean every event was a block of its own.
+func Normalise(o Options) Options { return o.normalised() }
 
 func (o Options) normalised() Options {
 	if o.ClusterGap <= 0 {
@@ -212,6 +302,11 @@ type Totals struct {
 	// reading an answer take a while. Already inside Attention; reported
 	// apart because it is the one part of the day that was not measured.
 	Padding time.Duration
+	// Claimed is time between blocks that a person said was work. It is not
+	// part of Active and is not summed into anything: the day measured
+	// nothing there, and this is somebody's answer rather than a measurement.
+	// Reported on a line of its own for the same reason background is.
+	Claimed time.Duration
 	// OneNeighbour is how much of Active sits in blocks that took their
 	// project from the only named block anywhere near them, with nothing on
 	// the far side to agree or disagree. It is already counted inside
@@ -232,11 +327,80 @@ type Run struct {
 	Attention  time.Duration
 	Background time.Duration
 	// Gap marks a pause between blocks: no events, no time counted.
-	Gap         bool
+	Gap bool
+	// Claimed marks a pause somebody said was work, and Project then holds
+	// what they said it was. It still counts as no time; the schedule says
+	// where they said it and what they called it.
+	Claimed     bool
 	Events      int
 	Sources     []SourceCount
 	BrowserKeys []BrowserKey
 }
+
+// Ground says what a stretch of the day rests on. It is kept for the reader
+// rather than for the program: in six months, "why does this half hour say
+// Widgets" has an answer, and the answers are not equally strong.
+type Ground string
+
+const (
+	// GroundRule is a line of the dictionary matched this event's own trace.
+	GroundRule Ground = "rule"
+	// GroundFallback is the guess the source made out of the working
+	// directory, which nobody wrote down and which is wrong in both
+	// directions at once.
+	GroundFallback Ground = "fallback"
+	// GroundInherited is an event with no trace of its own taking the name of
+	// the nearest prompt in its own block.
+	GroundInherited Ground = "inherited"
+	// GroundNeighbours is a block where nothing was named, with named blocks
+	// on both sides agreeing.
+	GroundNeighbours Ground = "neighbours"
+	// GroundOneNeighbour is the same with nothing at all on the far side:
+	// the weakest rule in the program, and the one the report counts out loud.
+	GroundOneNeighbour Ground = "one-neighbour"
+	// GroundManual is a person saying so, in a way that also became a rule.
+	GroundManual Ground = "manual"
+	// GroundOneOff is a person saying so where no rule could have been
+	// written. Counted separately and on purpose: hand marking has to stay
+	// visible, or in a month a row resting on a rule and a row resting on a
+	// hand look the same.
+	GroundOneOff Ground = "one-off"
+	// GroundNone is time no rule and no neighbour could name.
+	GroundNone Ground = ""
+)
+
+// Kind is which of the three parts of the day a stretch is.
+type Kind string
+
+const (
+	// KindAttention is active time inside the window a human touch casts.
+	KindAttention Kind = "attention"
+	// KindBackground is active time outside every window: the agent alone.
+	KindBackground Kind = "background"
+	// KindPadding is the head and the tail — writing a prompt and reading the
+	// last answer. Inside attention already, and named apart because it is
+	// the only part of the day that was not measured at all.
+	KindPadding Kind = "padding"
+)
+
+// Stretch is the day cut into pieces that have one answer to every question:
+// one project, one subject, one kind, one ground. Together they tile the active
+// time of the day exactly once, which is what makes them the thing a confirmed
+// day is stored as.
+//
+// Runs are the same partition read for a person — merged by project, with the
+// pauses between blocks put back in. Two readings, one cut, so they cannot
+// disagree.
+type Stretch struct {
+	From, To time.Time
+	Project  string
+	Subject  string
+	Kind     Kind
+	Ground   Ground
+}
+
+// Duration is how long the stretch is.
+func (s Stretch) Duration() time.Duration { return s.To.Sub(s.From) }
 
 // Day is one local day, computed on its own events only. A block of work never
 // crosses midnight, so asking for a day and asking for the week that contains
@@ -249,6 +413,8 @@ type Day struct {
 	Totals
 	Clusters []Cluster
 	Runs     []Run
+	// Stretches is the partition of the day's active time. See Stretch.
+	Stretches []Stretch
 	// Unmatched is what no rule mentions: the raw material for the next line
 	// of the dictionary. It changes nothing that is measured.
 	Unmatched []Unmatched
@@ -311,6 +477,10 @@ type Project struct {
 	// not extra to it, and it does not add up to the project's either — most
 	// of a project's time belongs to no subject in particular.
 	Subjects []Subject
+	// Claimed is time between blocks somebody said belonged to this project.
+	// Never part of Attention or Background: nothing measured it, and a total
+	// made of a measurement and a recollection is one nobody can check.
+	Claimed time.Duration
 	// Work is what the dictionary declared this project to be. Nil means it
 	// did not say, which is not the same as personal.
 	Work *bool
@@ -328,6 +498,8 @@ type Subject struct {
 	Name       string
 	Attention  time.Duration
 	Background time.Duration
+	// Claimed is time between blocks somebody said belonged to this subject.
+	Claimed time.Duration
 	// Events is how many events named this subject themselves. Unlike a
 	// project's count there is no inheritance behind it.
 	Events int
@@ -391,6 +563,11 @@ type entry struct {
 	// reads this rather than project, so the order blocks are visited in
 	// cannot change the answer.
 	own bool
+	// byRule records that the project came from a line of the dictionary
+	// rather than from the guess the source made out of the working
+	// directory. It is what tells a name somebody wrote from a name nobody
+	// did, which the report prints identically and a confirmed day must not.
+	byRule bool
 }
 
 // Build turns events into a report for [from, to), both in local time.
@@ -418,13 +595,13 @@ func Build(events []event.Event, from, to time.Time, opts Options) Report {
 		// would reach only what was collected after it was written. Applied
 		// here it reaches the whole database, and a rule that turns out to be
 		// wrong costs one edit and one re-run.
-		project, subject := e.Project, ""
+		project, subject, byRule := e.Project, "", false
 		if opts.Attribution != nil {
-			project, subject = opts.Attribution.Resolve(e)
+			project, subject, byRule = opts.Attribution.Resolve(e)
 		}
 		entries = append(entries, entry{
 			e: e, t: local, end: local.Add(ownSpan(e)),
-			project: project, subject: subject, own: project != "",
+			project: project, subject: subject, own: project != "", byRule: byRule,
 		})
 	}
 	// The store hands events back in a total order already. Sorting again is
@@ -479,7 +656,7 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 	blocks := splitBlocks(entries, opts.ClusterGap)
 	origins, candidates := attribute(entries, blocks)
 	windows := attentionWindows(entries, opts.AttentionWindow)
-	owners, ownerSubjects, ownerSessions := intervalOwners(entries, blocks)
+	owners, ownerSubjects, ownerSessions, touches := intervalOwners(entries, blocks)
 	live := liveSessions(entries, opts.ClusterGap)
 
 	// The time between two adjacent events belongs to the project you last
@@ -493,6 +670,11 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 	// each have a "release" and they are two different things.
 	type subjectKey struct{ project, subject string }
 	bySubject := map[subjectKey]*totals{}
+	// Time between blocks that a person said belonged to a project. Kept apart
+	// from everything measured, all the way to the row: one number made of a
+	// measurement and a recollection is a number nobody can check.
+	claimed := map[string]time.Duration{}
+	claimedSubject := map[subjectKey]time.Duration{}
 	agent := map[string]time.Duration{}
 
 	// What the dictionary says nothing about. Counted per event here and given
@@ -614,6 +796,16 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 				cuts = append(cuts, entries[i].end)
 			}
 		}
+		// And wherever somebody said something about part of this block. Cut
+		// here so that an answer about ten minutes of a stretch does not have
+		// to take the whole stretch with it.
+		for _, a := range opts.Manual {
+			for _, edge := range []time.Time{a.From, a.To} {
+				if edge.After(blockFrom) && edge.Before(blockTo) {
+					cuts = append(cuts, edge)
+				}
+			}
+		}
 		cuts = append(cuts, blockTo)
 		sort.Slice(cuts, func(i, j int) bool { return cuts[i].Before(cuts[j]) })
 
@@ -665,7 +857,22 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 			if u := unmatchedOf(i); u != nil {
 				u.Time += span
 			}
-			owner := owners[i]
+			owner, sub := owners[i], ownerSubjects[i]
+			ground := groundOf(entries[touches[i]], owners[i], origins[b.lo])
+			// What a person said about this stretch beats what was worked out
+			// about it. That is the whole of what an assignment is: the rules
+			// stay as they are and this piece of this day is what it was said
+			// to be.
+			if a, ok := covering(opts.Manual, from, to); ok {
+				if a.Project != "" {
+					owner = a.Project
+					sub = ""
+				}
+				if a.Subject != "" || a.ClearSubject {
+					sub = a.Subject
+				}
+				ground = a.ground()
+			}
 			t, ok := byProject[owner]
 			if !ok {
 				t = &totals{}
@@ -679,7 +886,7 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 			// The same stretch, filed under the accumulating thing it was
 			// part of. Time with no subject is simply not filed anywhere,
 			// which is why the subjects of a project do not add up to it.
-			if sub := ownerSubjects[i]; sub != "" {
+			if sub != "" {
 				k := subjectKey{owner, sub}
 				into, ok := bySubject[k]
 				if !ok {
@@ -701,6 +908,22 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 					From: from, To: to, Project: owner,
 					Attention: att, Background: span - att,
 				})
+			}
+
+			// The same stretch again, cut where it crosses in and out of an
+			// attention window so that every piece has one answer to every
+			// question. This is the day as it is stored when it is confirmed;
+			// the runs above are the same cut read for a person.
+			if st.human {
+				day.Stretches = append(day.Stretches, Stretch{
+					From: from, To: to, Project: owner, Subject: sub,
+					Kind: KindPadding, Ground: ground,
+				})
+			} else {
+				for _, part := range windows.parts(from, to) {
+					part.Project, part.Subject, part.Ground = owner, sub, ground
+					day.Stretches = append(day.Stretches, part)
+				}
 			}
 
 			// The same seconds, seen from every window you were not in. Two
@@ -730,11 +953,92 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		day.Clusters = append(day.Clusters, c)
 	}
 
+	// What a person said about the pauses — before the rows are built, not
+	// after: the rows read this map, and a map filled afterwards is a map that
+	// was empty when it mattered. The numbers were right on the day and zero
+	// the moment it was frozen.
+	//
+	// Nothing else about the day moves, which is the whole of what was decided
+	// about it.
+	// Summed from what was said, not from what still matches.
+	//
+	// An answer is about a stretch of a day that a person looked at. The
+	// blocks around it move whenever a setting does — a longer head, a
+	// different clustering threshold, an import that adds an event — and an
+	// answer that only counted while its boundaries still lined up would
+	// evaporate silently the first time one of those happened. Measured: two
+	// pauses answered, one config edit, and the total went *down*.
+	//
+	// So the time comes from the answer. Matching a run is only how the
+	// schedule knows which line to mark, and a mark that cannot be placed
+	// costs the mark rather than the hour.
+	// Merged before they are summed. Two answers can overlap each other — the
+	// commonest way is an import splitting a pause somebody had already
+	// answered, so the two halves are asked about again and the whole is still
+	// on record — and adding both would count the overlap twice. The first
+	// answer wins the shared minutes, which is the same rule the schedule uses.
+	for _, p := range merged(claimedOf(opts.Pauses, date, dayEnd)) {
+		// And what is left of it once the blocks have had their share.
+		//
+		// The claimed line means "between blocks, where nothing was
+		// recorded". Settings move block boundaries, and a block that has
+		// grown to cover part of an answered pause has *measured* that part —
+		// counting it here as well would be the same hour twice, which is the
+		// one mistake this whole project is written against. Whatever is still
+		// outside every block stays: an answer does not evaporate because a
+		// threshold moved.
+		held := p.To.Sub(p.From)
+		for _, r := range day.Runs {
+			if r.Gap {
+				continue
+			}
+			lo, hi := p.From, p.To
+			if r.From.After(lo) {
+				lo = r.From
+			}
+			if r.To.Before(hi) {
+				hi = r.To
+			}
+			if hi.After(lo) {
+				held -= hi.Sub(lo)
+			}
+		}
+		if held <= 0 {
+			continue
+		}
+		day.Claimed += held
+		claimed[p.Project] += held
+		if p.Subject != "" {
+			claimedSubject[subjectKey{p.Project, p.Subject}] += held
+		}
+	}
+	for i := range day.Runs {
+		if !day.Runs[i].Gap {
+			continue
+		}
+		for _, p := range opts.Pauses {
+			if p.Worked && p.From.Equal(day.Runs[i].From) && p.To.Equal(day.Runs[i].To) {
+				day.Runs[i].Claimed = true
+				day.Runs[i].Project = p.Project
+			}
+		}
+	}
+
 	// Every project that holds an event gets a row, including the ones that
 	// hold no time at all: a single visit, or the last event of a block, is a
-	// real trace of a real project and a row of zeros says so.
-	for _, name := range distinctProjects(entries) {
-		p := Project{Name: name, Agent: agent[name]}
+	// real trace of a real project and a row of zeros says so. And every
+	// project that holds time, which after an assignment is not the same list:
+	// naming half an hour after something no trace mentions is exactly what an
+	// assignment is for.
+	named := distinctProjects(entries)
+	for name := range byProject {
+		named = append(named, name)
+	}
+	for name := range claimed {
+		named = append(named, name)
+	}
+	for _, name := range uniqueNames(named) {
+		p := Project{Name: name, Agent: agent[name], Claimed: claimed[name]}
 		if t, ok := byProject[name]; ok {
 			p.Attention, p.Background = t.attention, t.background
 		}
@@ -748,12 +1052,43 @@ func buildDay(entries []entry, date time.Time, opts Options) Day {
 		// Every subject seen under this project gets a row, including one that
 		// holds no time: a single page about a ticket is a real trace of that
 		// ticket, and a row of zeros says so rather than losing it.
+		//
+		// And every subject that holds time, which is not the same list: an
+		// answer can name a subject no event in the day carries, and that is
+		// the whole point of an answer no rule could have been written for.
+		// Leaving it out computed the hour and then dropped it.
+		seen := map[string]bool{}
 		for _, s := range subjectsOf(entries, name) {
 			if t, ok := bySubject[subjectKey{name, s.Name}]; ok {
 				s.Attention, s.Background = t.attention, t.background
 			}
+			seen[s.Name] = true
 			p.Subjects = append(p.Subjects, s)
 		}
+		for k, t := range bySubject {
+			if k.project != name || seen[k.subject] {
+				continue
+			}
+			seen[k.subject] = true
+			p.Subjects = append(p.Subjects, Subject{
+				Name: k.subject, Attention: t.attention, Background: t.background, Days: 1,
+			})
+		}
+		for k, held := range claimedSubject {
+			if k.project != name {
+				continue
+			}
+			if seen[k.subject] {
+				for i := range p.Subjects {
+					if p.Subjects[i].Name == k.subject {
+						p.Subjects[i].Claimed = held
+					}
+				}
+				continue
+			}
+			p.Subjects = append(p.Subjects, Subject{Name: k.subject, Claimed: held, Days: 1})
+		}
+		sortSubjects(p.Subjects)
 		day.Projects = append(day.Projects, p)
 	}
 	sortProjects(day.Projects)
@@ -1063,10 +1398,15 @@ func attribute(entries []entry, blocks []block) (map[int]Origin, map[int][]strin
 // same reason: the minutes around a page about one ticket were spent on that
 // ticket. It is empty whenever that touch named no subject, and nothing fills
 // it in afterwards.
-func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions []string) {
+func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions []string, touches []int) {
 	owners = make([]string, len(entries))
 	subjects = make([]string, len(entries))
 	sessions = make([]string, len(entries))
+	// touches is the event each stretch was charged to. The ground of a
+	// stretch is the ground of *that* event, not of the one that opened it,
+	// and reading the wrong one would file half the day under "fallback"
+	// wherever a browser visit sat next to a named prompt.
+	touches = make([]int, len(entries))
 	for _, b := range blocks {
 		prev := make([]int, b.hi-b.lo)
 		last := -1
@@ -1087,8 +1427,10 @@ func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions
 		claim := func(i, touch int) {
 			if touch < 0 {
 				owners[i], subjects[i], sessions[i] = entries[i].project, entries[i].subject, ""
+				touches[i] = i
 				return
 			}
+			touches[i] = touch
 			owners[i] = entries[touch].project
 			subjects[i] = entries[touch].subject
 			// The window the touch was in. Empty for a browser visit, which
@@ -1118,7 +1460,7 @@ func intervalOwners(entries []entry, blocks []block) (owners, subjects, sessions
 			}
 		}
 	}
-	return owners, subjects, sessions
+	return owners, subjects, sessions, touches
 }
 
 // liveRun is one window producing output for one project: when that session's
@@ -1319,6 +1661,56 @@ func (w *windows) add(from, to time.Time) {
 	w.to = append(w.to, to)
 }
 
+// parts cuts [from, to) where it enters and leaves a window, so that every
+// piece is entirely attention or entirely not. It is overlap answered in full
+// rather than as a total, and it exists because the confirmed day is stored as
+// a partition: a row that is half one kind and half another has no kind.
+func (w *windows) parts(from, to time.Time) []Stretch {
+	var out []Stretch
+	at := from
+	i := sort.Search(len(w.from), func(i int) bool { return w.to[i].After(from) })
+	for ; i < len(w.from) && w.from[i].Before(to); i++ {
+		lo, hi := w.from[i], w.to[i]
+		if lo.Before(at) {
+			lo = at
+		}
+		if hi.After(to) {
+			hi = to
+		}
+		if lo.After(at) {
+			out = append(out, Stretch{From: at, To: lo, Kind: KindBackground})
+		}
+		if hi.After(lo) {
+			out = append(out, Stretch{From: lo, To: hi, Kind: KindAttention})
+			at = hi
+		}
+	}
+	if to.After(at) {
+		out = append(out, Stretch{From: at, To: to, Kind: KindBackground})
+	}
+	return out
+}
+
+// gaps is the parts of [from, to) that lie outside every window: the opposite
+// of overlap, answered in full rather than as a total.
+func (w *windows) gaps(from, to time.Time) []Stretch {
+	var out []Stretch
+	at := from
+	i := sort.Search(len(w.from), func(i int) bool { return w.to[i].After(from) })
+	for ; i < len(w.from) && w.from[i].Before(to); i++ {
+		if w.from[i].After(at) {
+			out = append(out, Stretch{From: at, To: w.from[i]})
+		}
+		if w.to[i].After(at) {
+			at = w.to[i]
+		}
+	}
+	if to.After(at) {
+		out = append(out, Stretch{From: at, To: to})
+	}
+	return out
+}
+
 // overlap is how much of [from, to) falls inside a window. It keeps no state
 // between calls: the answer for an interval is the same whenever it is asked,
 // which is what lets the same interval be counted into a project and into a
@@ -1407,7 +1799,10 @@ type SubjectReport struct {
 	Name       string
 	Attention  time.Duration
 	Background time.Duration
-	Events     int
+	// Claimed is time between blocks somebody said belonged to this subject.
+	// Never part of Attention or Background: nothing measured it.
+	Claimed time.Duration
+	Events  int
 	// First and Last are the first and last local day the subject appears on.
 	First, Last time.Time
 	// Projects is the subject's own time, split by the project it fell under.
@@ -1422,7 +1817,9 @@ type SubjectDay struct {
 	Date       time.Time
 	Attention  time.Duration
 	Background time.Duration
-	Events     int
+	// Claimed is time between blocks somebody said belonged to this subject.
+	Claimed time.Duration
+	Events  int
 }
 
 // SubjectOf reads one subject out of a report. The name is matched without
@@ -1444,6 +1841,7 @@ func (r Report) SubjectOf(name string) SubjectReport {
 				out.Name = s.Name
 				d.Attention += s.Attention
 				d.Background += s.Background
+				d.Claimed += s.Claimed
 				d.Events += s.Events
 				i, ok := byProject[p.Name]
 				if !ok {
@@ -1453,10 +1851,11 @@ func (r Report) SubjectOf(name string) SubjectReport {
 				}
 				out.Projects[i].Attention += s.Attention
 				out.Projects[i].Background += s.Background
+				out.Projects[i].Claimed += s.Claimed
 				out.Projects[i].Events += s.Events
 			}
 		}
-		if d.Events == 0 && d.Attention == 0 && d.Background == 0 {
+		if d.Events == 0 && d.Attention == 0 && d.Background == 0 && d.Claimed == 0 {
 			continue
 		}
 		if out.First.IsZero() {
@@ -1465,6 +1864,7 @@ func (r Report) SubjectOf(name string) SubjectReport {
 		out.Last = day.Date
 		out.Attention += d.Attention
 		out.Background += d.Background
+		out.Claimed += d.Claimed
 		out.Events += d.Events
 		out.Days = append(out.Days, d)
 	}
@@ -1604,11 +2004,90 @@ func mergeSubjects(into, from []Subject) []Subject {
 		}
 		into[i].Attention += s.Attention
 		into[i].Background += s.Background
+		into[i].Claimed += s.Claimed
 		into[i].Events += s.Events
 		into[i].Days += s.Days
 	}
 	sortSubjects(into)
 	return into
+}
+
+// claimedOf is the day's worked answers, in the order they were given.
+func claimedOf(pauses []Pause, date, end time.Time) []Pause {
+	var out []Pause
+	for _, p := range pauses {
+		// This day's answers only. Matching a run used to scope them by
+		// accident; summing them does not, and a week would otherwise add
+		// every day's pauses to every day in it.
+		if p.Worked && !p.From.Before(date) && p.From.Before(end) && p.To.After(p.From) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// merged cuts overlaps out of a list of answers, earliest answer first, so that
+// a minute claimed twice is counted once.
+//
+// The earlier answer keeps the shared minutes rather than the later one: an
+// answer is about a stretch somebody looked at, and the first look is the one
+// that covered the whole of it.
+func merged(pauses []Pause) []Pause {
+	sort.SliceStable(pauses, func(i, j int) bool { return pauses[i].From.Before(pauses[j].From) })
+	var out []Pause
+	var taken windows
+	for _, p := range pauses {
+		for _, part := range taken.gaps(p.From, p.To) {
+			out = append(out, Pause{
+				From: part.From, To: part.To,
+				Worked: true, Project: p.Project, Subject: p.Subject,
+			})
+		}
+		taken.add(p.From, p.To)
+	}
+	return out
+}
+
+// uniqueNames sorts project names the way rows are ordered — unnamed last —
+// and drops repeats. Unlike distinct it keeps the unnamed one, which is a row
+// like any other here and is only empty because that is what "no project"
+// looks like.
+func uniqueNames(names []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool { return lessName(out[i], out[j]) })
+	return out
+}
+
+// groundOf says what one event's project rests on. The block's origin decides
+// the two cases where the name did not come from the event at all.
+func groundOf(en entry, owner string, origin Origin) Ground {
+	if owner == Unnamed {
+		return GroundNone
+	}
+	if en.own {
+		if en.byRule {
+			return GroundRule
+		}
+		return GroundFallback
+	}
+	switch origin {
+	case OriginNeighbours:
+		return GroundNeighbours
+	case OriginOneNeighbour:
+		return GroundOneNeighbour
+	default:
+		// Named inside a block that had a name of its own: the nearest prompt
+		// in it lent the name to an event with no trace to be named by.
+		return GroundInherited
+	}
 }
 
 // distinctProjects lists every project present, in a stable order.
@@ -1730,6 +2209,14 @@ func distinct(values []string) []string {
 	return out
 }
 
+// SortProjects is sortProjects for a caller rebuilding a day from a snapshot:
+// the stored order is by name, for byte-stable exports, and a report is read
+// busiest-first.
+func SortProjects(projects []Project) { sortProjects(projects) }
+
+// SortSubjects is the same for the second level.
+func SortSubjects(subjects []Subject) { sortSubjects(subjects) }
+
 // sortProjects puts the busiest first and the unnamed row last. Project names
 // are unique within a report, so the order is total: two runs cannot disagree.
 func sortProjects(projects []Project) {
@@ -1772,6 +2259,7 @@ func aggregate(days []Day) Totals {
 		total.Span += day.Span
 		total.Agent += day.Agent
 		total.Padding += day.Padding
+		total.Claimed += day.Claimed
 		total.OneNeighbour += day.OneNeighbour
 		for _, p := range day.Projects {
 			i, ok := index[p.Name]
@@ -1783,6 +2271,7 @@ func aggregate(days []Day) Totals {
 			t := &total.Projects[i]
 			t.Attention += p.Attention
 			t.Background += p.Background
+			t.Claimed += p.Claimed
 			t.Agent += p.Agent
 			t.Wall += p.Wall
 			t.Events += p.Events

@@ -20,9 +20,6 @@ import (
 	"github.com/vadosdog/spoor-timetracker/internal/store"
 )
 
-// batchSize is how many events go into one transaction.
-const batchSize = 2000
-
 // Calendar is one feed to read.
 //
 // Exactly one of URLFile and File is set. The URL itself is not a field: it
@@ -49,6 +46,13 @@ type Report struct {
 	Counts        Counts
 	Events        int
 	NewEvents     int
+	// MovedEvents is meetings that were already stored and are now at another
+	// time, of another length, or under another name. RemovedEvents is the
+	// ones the feed no longer holds: cancelled, or an occurrence of a series
+	// that moved. Both are only possible because this source replaces its
+	// window rather than appending to it.
+	MovedEvents   int
+	RemovedEvents int
 	Errors        []string
 }
 
@@ -99,29 +103,86 @@ func ingestOne(ctx context.Context, st *store.Store, c Calendar, opts Options, r
 	}
 	rep.Counts.add(named)
 
-	batch := make([]event.Event, 0, batchSize)
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		n, err := st.InsertEvents(batch)
-		if err != nil {
-			return err
-		}
-		rep.NewEvents += n
-		batch = batch[:0]
-		return nil
-	}
+	events := make([]event.Event, 0, len(meetings))
 	for _, m := range meetings {
 		rep.Events++
-		batch = append(batch, ToEvent(m, c.ID))
-		if len(batch) >= batchSize {
-			if err := flush(); err != nil {
-				return err
-			}
+		events = append(events, ToEvent(m, c.ID))
+	}
+
+	// The window is replaced rather than appended to, and this is the only
+	// source that does it. A feed does not append: it restates. The identity
+	// of a meeting is calendar + UID + occurrence, and a meeting moved from
+	// 10:00 to 14:00 keeps all three — so an insert that ignores conflicts
+	// keeps the old hour for ever. A series moved wholesale changes every
+	// occurrence, so the new times arrive, the old ones stay, and the day is
+	// counted twice. A meeting cancelled after it was imported is skipped at
+	// parse time and its row outlives it. All three are "quietly more than
+	// there was", which is the failure this tool exists to prevent.
+	//
+	// The window is the one that was expanded, so a meeting older than
+	// --calendar-back is left alone: the feed said nothing about it.
+	//
+	// A feed holding events, all of them cancelled or all of them all-day, is
+	// a feed that answered: there are no meetings here, remove what was. A
+	// feed holding no events at all is not — that is also what an expired
+	// address and a maintenance page look like, and the difference between
+	// the two is the difference between a correct empty day and a year of
+	// meetings gone.
+	//
+	// And **one** event this parser could not read is enough to stop the
+	// deleting half. Those are spoor failing to understand the feed, not the
+	// feed saying the meetings are gone; the day a provider changes a rule
+	// shape is the day a series' whole stored history would otherwise be
+	// deleted while `ingest` exits 0.
+	//
+	// It was written as "were they *all* unreadable", which protects only the
+	// case where nothing at all parsed — and the case worth protecting is one
+	// series out of fifty. Inserting and updating still happen; the run says
+	// what it refused to remove and why, so a genuinely cancelled meeting is
+	// one fixed feed away from going.
+	sync, err := st.ReplaceWindow(store.Window{
+		Source:     SourceName,
+		Entrypoint: entrypointOf(c.ID),
+		From:       opts.From,
+		To:         opts.To,
+		Events:     events,
+		Whole: counts.Events > 0 &&
+			counts.Unreadable == 0 && counts.Unexpanded == 0 && counts.Truncated == 0,
+	})
+	if err != nil {
+		return err
+	}
+	// Two reasons, two messages. They are the two shapes of "spoor did not
+	// understand this feed", and the one diagnostic for the one operation that
+	// can lose data has to say which happened: an expired address looks
+	// nothing like a changed recurrence rule, and the fix is different.
+	if unread := counts.Unreadable + counts.Unexpanded + counts.Truncated; sync.RefusedEmpty {
+		switch {
+		case unread > 0:
+			rep.Counts.Notes = append(rep.Counts.Notes, fmt.Sprintf(
+				"calendar %q: %s in this feed could not be read in full, so nothing was "+
+					"removed from the window — spoor not understanding a feed is not the "+
+					"feed saying a meeting is gone",
+				c.ID, count(unread, "event", "events")))
+		default:
+			rep.Counts.Notes = append(rep.Counts.Notes, fmt.Sprintf(
+				"calendar %q: this feed holds no events at all while the database holds "+
+					"meetings from it, so nothing was removed — an empty answer is also "+
+					"what an expired address and a login page look like", c.ID))
 		}
 	}
-	return flush()
+	rep.NewEvents += sync.New
+	rep.MovedEvents += sync.Moved
+	rep.RemovedEvents += sync.Removed
+	return nil
+}
+
+// count is a number with its noun.
+func count(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // read gets the feed, from the network or from a file.

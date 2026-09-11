@@ -1029,19 +1029,19 @@ type dict struct {
 	never   map[string]bool // hosts refused on purpose
 }
 
-func (d dict) Resolve(e event.Event) (string, string) {
+func (d dict) Resolve(e event.Event) (string, string, bool) {
 	subject := d.subject[e.Title]
 	if p, ok := d.byCWD[e.CWD]; ok {
-		return p, subject
+		return p, subject, true
 	}
 	if d.never[e.Host] {
-		return "", subject
+		return "", subject, false
 	}
 	if p, ok := d.byHost[e.Host]; ok {
-		return p, subject
+		return p, subject, true
 	}
 	// No rule: a Claude Code event keeps the guess its directory gave it.
-	return e.Project, subject
+	return e.Project, subject, false
 }
 
 func (d dict) Work(project string) (bool, bool) {
@@ -1360,7 +1360,7 @@ func TestAPrintedKeyNamesTheEventItCameFrom(t *testing.T) {
 		for _, p := range problems {
 			t.Errorf("pasting %q gave a problem: %q %s", printed, p.Entry, p.Reason)
 		}
-		if got, _ := r.Resolve(e); got != "pasted" {
+		if got, _, _ := r.Resolve(e); got != "pasted" {
 			t.Errorf("the key %q printed for %v named %q when pasted back", printed, h, got)
 		}
 		if !r.Covers(e) {

@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"testing"
 	"time"
 
@@ -439,5 +441,222 @@ func TestEventsBetweenLoadsTitles(t *testing.T) {
 	}
 	if got[0].Title != title {
 		t.Errorf("Title = %q, want %q", got[0].Title, title)
+	}
+}
+
+// A column added to a table that already exists reaches nobody: CREATE TABLE
+// IF NOT EXISTS does nothing to a table that is there, and the failure is a
+// query that says "no such column" — or, in the shape this project has already
+// paid for once, an import that exits 0 and stores nothing.
+//
+// So every column in addedColumns is checked against a database opened twice:
+// once by a build that did not have it, and once by this one.
+func TestEveryAddedColumnReachesAnOlderDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spoor.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Take the columns away again, which is what an older build's database
+	// looks like. A column an index depends on cannot be dropped; those are
+	// covered by the other tests in this file.
+	dropped := 0
+	for _, c := range addedColumns {
+		if _, err := st.db.Exec(fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", c.table, c.column)); err == nil {
+			dropped++
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("no column could be taken away, so this test proves nothing")
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatalf("opening a database missing the added columns failed: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	for _, c := range addedColumns {
+		has, err := hasColumn(st.db, c.table, c.column)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Errorf("%s.%s did not reach a database that predates it", c.table, c.column)
+		}
+	}
+}
+
+// A confirmed day goes into the database and comes back the same.
+//
+// Field by field, by reflection, because that is the only version of this test
+// that keeps working. Three fields were added to these rows while this stage
+// was being written and every one of them reached the struct and not the SQL:
+// the value was carried all the way to the insert and dropped there, so the
+// day looked right until it was frozen and then quietly held zeros. Nothing
+// failed; a number simply stopped existing.
+//
+// So this walks every field of every row rather than the ones somebody thought
+// of, and a new column that is not in both statements fails here rather than
+// in six months in somebody's report.
+func TestAConfirmedDayRoundTripsEveryField(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "spoor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	work := true
+	at := time.Date(2026, 5, 4, 9, 0, 0, 0, time.UTC)
+	want := ConfirmedDay{
+		Day:               "2026-05-04",
+		ConfirmedAt:       at,
+		ConfigHash:        "abc123",
+		Version:           "test",
+		ClusterGap:        11 * time.Minute,
+		AttentionWindow:   6 * time.Minute,
+		Head:              3 * time.Minute,
+		Tail:              4 * time.Minute,
+		CountBackground:   true,
+		OneNeighbour:      7 * time.Minute,
+		Claimed:           8 * time.Minute,
+		QuestionsTotal:    12,
+		QuestionsAnswered: 9,
+		Rows: []ConfirmedRow{{
+			Project: "Alpha", Subject: "beta", Work: &work, Events: 42,
+			Attention: 1 * time.Minute, Claimed: 2 * time.Minute,
+			Background: 3 * time.Minute, Padding: 4 * time.Minute,
+			Agent: 5 * time.Minute, Wall: 6 * time.Minute,
+		}},
+		Stretches: []ConfirmedStretch{{
+			From: at, To: at.Add(time.Minute), Project: "Alpha", Subject: "beta",
+			Kind: "attention", Ground: "rule",
+		}},
+		OneOffs: []ConfirmedOneOff{{
+			From: at, To: at.Add(time.Minute), Project: "Alpha", Subject: "beta",
+			Reason: "nothing here could carry a rule",
+		}},
+	}
+	want.OneOffCount = len(want.OneOffs)
+
+	if err := st.Confirm(want); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := st.Confirmed(want.Day)
+	if err != nil || !ok {
+		t.Fatalf("reading it back: %v, found=%v", err, ok)
+	}
+
+	// Every scalar field of the day, and of one row of each kind. Reflection
+	// rather than a list, so that a field added tomorrow is covered today.
+	compare(t, "day", reflect.ValueOf(want), reflect.ValueOf(got))
+	compare(t, "row", reflect.ValueOf(want.Rows[0]), reflect.ValueOf(got.Rows[0]))
+	compare(t, "stretch", reflect.ValueOf(want.Stretches[0]), reflect.ValueOf(got.Stretches[0]))
+	compare(t, "one-off", reflect.ValueOf(want.OneOffs[0]), reflect.ValueOf(got.OneOffs[0]))
+}
+
+// compare checks every field that is not a slice — the slices are compared
+// element by element by the caller.
+func compare(t *testing.T, what string, want, got reflect.Value) {
+	t.Helper()
+	for i := 0; i < want.NumField(); i++ {
+		field := want.Type().Field(i)
+		if field.Type.Kind() == reflect.Slice {
+			continue
+		}
+		a, b := want.Field(i).Interface(), got.Field(i).Interface()
+		if at, ok := a.(time.Time); ok {
+			if !at.Equal(b.(time.Time)) {
+				t.Errorf("%s.%s: wrote %v, read back %v", what, field.Name, a, b)
+			}
+			continue
+		}
+		if field.Type.Kind() == reflect.Pointer {
+			if want.Field(i).IsNil() != got.Field(i).IsNil() {
+				t.Errorf("%s.%s: wrote %v, read back %v", what, field.Name, a, b)
+				continue
+			}
+			if !want.Field(i).IsNil() &&
+				want.Field(i).Elem().Interface() != got.Field(i).Elem().Interface() {
+				t.Errorf("%s.%s: wrote %v, read back %v",
+					what, field.Name, want.Field(i).Elem(), got.Field(i).Elem())
+			}
+			continue
+		}
+		if a != b {
+			t.Errorf("%s.%s: wrote %v, read back %v", what, field.Name, a, b)
+		}
+	}
+}
+
+// The other two tables a person's answers live in, round-tripped the same way
+// and for the same reason: every one of them has gained a column since it was
+// written, and a column that reaches the struct and not the SQL fails
+// silently.
+func TestAnswersRoundTripEveryField(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "spoor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	at := time.Date(2026, 5, 4, 9, 0, 0, 0, time.UTC)
+	assignment := Assignment{
+		Day: "2026-05-04", From: at, To: at.Add(time.Hour),
+		Project: "Alpha", Subject: "beta", ClearSubject: true,
+		OneOff: true, Reason: "nothing here could carry a rule",
+	}
+	if err := st.SaveAssignment(assignment); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Assignments(assignment.Day)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("reading it back: %v, %d rows", err, len(got))
+	}
+	compare(t, "assignment", reflect.ValueOf(assignment), reflect.ValueOf(got[0]))
+
+	answer := WindowAnswer{
+		Day: "2026-05-04", From: at, To: at.Add(time.Hour),
+		Worked: true, Project: "Alpha", Subject: "beta",
+		Left: "Alpha", Right: "Gamma",
+	}
+	if err := st.SaveWindowAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	answers, err := st.WindowAnswers(answer.Day)
+	if err != nil || len(answers) != 1 {
+		t.Fatalf("reading it back: %v, %d rows", err, len(answers))
+	}
+	compare(t, "window answer", reflect.ValueOf(answer), reflect.ValueOf(answers[0]))
+}
+
+// schema.sql and addedColumns have to agree.
+//
+// A column that exists only in the migration list reaches the database and no
+// comment reaches the reader: `schema.sql` is the file CLAUDE.md singles out as
+// the one somebody opens beside `sqlite3`, and the README promises that reading
+// it shows every column there is with the comment saying what it holds. Two
+// columns went in through the migration alone and were reported as fixed twice
+// before this test existed.
+func TestEveryMigratedColumnIsAlsoDeclared(t *testing.T) {
+	for _, c := range addedColumns {
+		// The declaration, not merely the word: "events" appears in prose all
+		// over this file.
+		decl := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(c.column) + `\s+\w`)
+		table := regexp.MustCompile(`(?s)CREATE TABLE IF NOT EXISTS ` +
+			regexp.QuoteMeta(c.table) + ` \((.*?)\n\);`).FindStringSubmatch(schemaSQL)
+		if table == nil {
+			t.Errorf("%s is in addedColumns and has no CREATE TABLE in schema.sql", c.table)
+			continue
+		}
+		if !decl.MatchString(table[1]) {
+			t.Errorf("%s.%s reaches the database through addedColumns and is not declared "+
+				"in schema.sql, so it has no comment and nobody reading the database can "+
+				"find out what it holds", c.table, c.column)
+		}
 	}
 }

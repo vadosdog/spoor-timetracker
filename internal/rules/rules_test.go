@@ -64,7 +64,8 @@ func web(host, port, segment, title string) event.Event {
 
 func resolve(t *testing.T, r *Rules, e event.Event) (string, string) {
 	t.Helper()
-	return r.Resolve(e)
+	p, s, _ := r.Resolve(e)
+	return p, s
 }
 
 func TestPathMatchesTheDirectoryAndEverythingUnderIt(t *testing.T) {
@@ -390,10 +391,10 @@ func TestNoRulesAtAllChangesNothing(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("problems = %+v, want none", problems)
 	}
-	if got, _ := r.Resolve(cc("/src/widget")); got != "widget" {
+	if got, _, _ := r.Resolve(cc("/src/widget")); got != "widget" {
 		t.Errorf("named %q, want the import guess: no config file has to keep working", got)
 	}
-	if got, _ := r.Resolve(web("x.example.com", "", "", "")); got != "" {
+	if got, _, _ := r.Resolve(web("x.example.com", "", "", "")); got != "" {
 		t.Errorf("named %q, want nothing", got)
 	}
 }
@@ -735,18 +736,18 @@ func TestNeverEntriesAreCheckedPerList(t *testing.T) {
 }
 
 // Silencing a directory must not silence the checkout inside it. `--unmatched`
-// prints /home/you as a directory to decide about, and pasting it in used to
+// prints /home/u as a directory to decide about, and pasting it in used to
 // take every rule under it away at once — the report survived, but every
 // project in the home directory collapsed to whatever its browser keys knew.
 func TestNeverLosesToAMoreSpecificRuleOfItsOwnKind(t *testing.T) {
 	r := compile(t, `
 attribution:
   never:
-    paths: /home/you
+    paths: /home/u
     keys: example.com
   projects:
     - name: widget
-      paths: /home/you/src/widget
+      paths: /home/u/src/widget
       keys: docs.example.com
 `)
 	cases := []struct {
@@ -754,14 +755,14 @@ attribution:
 		want string
 	}{
 		// Longer path, longer key: the rule speaks for itself.
-		{cc("/home/you/src/widget"), "widget"},
-		{cc("/home/you/src/widget/api"), "widget"},
+		{cc("/home/u/src/widget"), "widget"},
+		{cc("/home/u/src/widget/api"), "widget"},
 		{web("docs.example.com", "", "", ""), "widget"},
 		// Nothing more specific: silenced, and the guess does not creep back.
 		// Only the directory written, so what is under it keeps the guess and
 		// stays in the list of things to decide about.
-		{cc("/home/you"), ""},
-		{cc("/home/you/scratch"), "scratch"},
+		{cc("/home/u"), ""},
+		{cc("/home/u/scratch"), "scratch"},
 		{web("example.com", "", "", ""), ""},
 		{web("other.example.com", "", "", ""), ""},
 	}
@@ -806,11 +807,11 @@ attribution:
 		{`
 attribution:
   never:
-    paths: /home/you*
+    paths: /home/u*
   projects:
     - name: widget
-      paths: /home/you
-`, "/home/you"},
+      paths: /home/u
+`, "/home/u"},
 	}
 	for _, c := range cases {
 		_, problems := parse(t, c.doc)
@@ -831,11 +832,11 @@ attribution:
 attribution:
   never:
     keys: example.com
-    paths: /home/you*
+    paths: /home/u*
   projects:
     - name: widget
       keys: docs.example.com
-      paths: /home/you/src/widget
+      paths: /home/u/src/widget
 `)
 }
 
@@ -873,6 +874,55 @@ attribution:
 		}
 		if !found {
 			t.Errorf("nothing said about the subject %q: %v", want, said)
+		}
+	}
+}
+
+// The third return says whether a rule named this, or whether the name is the
+// source's own guess carried through.
+//
+// It decides confirmed_stretch.ground — the column that exists so somebody can
+// ask, months later, whether half an hour rests on a rule they wrote or on
+// basename(cwd). Every other test in this file throws it away, and the two
+// that read it run against a stub with its own hardcoded answer, so the real
+// implementation could return false for everything and nothing would notice.
+func titled(e event.Event, title string) event.Event {
+	e.Title = title
+	return e
+}
+
+func TestResolveSaysWhetherARuleNamedIt(t *testing.T) {
+	r := compile(t, `
+attribution:
+  projects:
+    - name: widget
+      paths: [/src/widget]
+      subjects:
+        - name: review
+          titles: ['^Merge request']
+    - name: reading
+      keys: [ops.example.invalid]
+`)
+	for _, c := range []struct {
+		what    string
+		e       event.Event
+		project string
+		subject string
+		byRule  bool
+	}{
+		{"a path rule", cc("/src/widget"), "widget", "", true},
+		{"a key rule", web("ops.example.invalid", "", "board", ""), "reading", "", true},
+		{"a subject inside a project", titled(cc("/src/widget"), "Merge request !12"), "widget", "review", true},
+		{"the source's own guess", event.Event{Source: "claude-code", Project: "guessed", CWD: "/elsewhere"},
+			"guessed", "", false},
+		{"nothing at all", event.Event{Source: "browser", Host: "unknown.invalid"}, "", "", false},
+	} {
+		project, subject, byRule := r.Resolve(c.e)
+		if project != c.project || subject != c.subject {
+			t.Errorf("%s: named %q/%q, want %q/%q", c.what, project, subject, c.project, c.subject)
+		}
+		if byRule != c.byRule {
+			t.Errorf("%s: byRule = %v, want %v", c.what, byRule, c.byRule)
 		}
 	}
 }

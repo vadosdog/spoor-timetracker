@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS events (
     -- all versions. Kept as columns rather than a JSON blob so the database
     -- stays readable. Empty on rows from any other source, with one
     -- exception: entrypoint names which instance of a source produced the
-    -- trace — 'cli' or 'claude-desktop' for Claude Code, 'chrome' or 'firefox'
+    -- trace — 'cli', 'claude-desktop' and the other clients for Claude Code,
+    -- 'chrome' or 'firefox'
     -- for the browser, and the calendar's own id for a meeting.
     session_id     TEXT    NOT NULL DEFAULT '',
     cwd            TEXT    NOT NULL DEFAULT '',
@@ -110,6 +111,191 @@ CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS events_project ON events (project);
 -- The index on host is not here: this file runs before the columns added
 -- after the first release exist. See addedIndexes in store.go.
+
+-- What a person said about a stretch of a day, where a rule could not say it.
+--
+-- Every other answer becomes a line of the dictionary and lives in the config
+-- file, because a rule is what stops the same question being asked twice.
+-- These are the ones no rule could carry: a block whose only traces are on the
+-- never list, one encounter with a trace that names a different subject every
+-- time, or a correction its author meant for this day and no other.
+--
+-- Times are RFC3339 in UTC, like events.ts, so that this table can be read
+-- beside that one. Durations in these tables are milliseconds instead, because
+-- a length is a number and an instant is a time.
+--
+-- An instant that describes a piece of the day carries milliseconds, as
+-- events.ts does, so that it compares to a trace. The ones that record when
+-- spoor was told something — made_at here, confirmed_at below — are to the
+-- second: nothing compares those to anything.
+CREATE TABLE IF NOT EXISTS assignment (
+    day       TEXT    NOT NULL,        -- local date, YYYY-MM-DD
+    from_ts   TEXT    NOT NULL,
+    to_ts     TEXT    NOT NULL,
+    -- Empty project means "leave the project as it is": an answer about the
+    -- subject alone is the commonest kind here.
+    project   TEXT    NOT NULL DEFAULT '',
+    subject   TEXT    NOT NULL DEFAULT '',
+    -- Empty subject already means "unchanged", so "none of them" needs a flag
+    -- of its own.
+    clear_subject INTEGER NOT NULL DEFAULT 0,
+    -- 1 when no rule could have been written for this. Counted and printed:
+    -- hand marking nobody can see is hand marking nobody will revisit.
+    one_off   INTEGER NOT NULL DEFAULT 0,
+    -- Why no rule could be written, because the point of counting these is
+    -- that somebody reads them months later. Spoor's own words, not yours:
+    -- one of a handful of fixed sentences saying which answer put the row
+    -- here ("answered for this block only"). Nothing typed reaches this
+    -- column.
+    reason    TEXT    NOT NULL DEFAULT '',
+    made_at   TEXT    NOT NULL,
+    PRIMARY KEY (day, from_ts, to_ts)
+);
+
+-- Whether a pause between two blocks was work.
+--
+-- No **measured** number moves because a row is in it. A pause is invisible in
+-- the traces — a cigarette and a meeting look identical on disk — so nothing
+-- here was measured by anything, and the attention, background, active and
+-- coverage figures are exactly what they would be if this table were empty.
+--
+-- What a row does buy is a line of its own: "pauses you called work" in the
+-- report, in --json, in an export, and against the project it was attached to
+-- in confirmed_row.claimed_ms below.
+--
+-- It exists to settle one question with data instead of memory: whether the
+-- gaps between blocks are worth storing as records of their own, which can
+-- only be found out by asking on the evening of the day while somebody still
+-- knows. If the answer turns out to be no, this table goes away with the
+-- screen that fills it. That is the deal it was built under.
+CREATE TABLE IF NOT EXISTS window_answer (
+    day           TEXT    NOT NULL,        -- local date, YYYY-MM-DD
+    from_ts       TEXT    NOT NULL,
+    to_ts         TEXT    NOT NULL,
+    worked        INTEGER NOT NULL,        -- 1 | 0, and there is no default
+    -- What it was, when it was work. A pause you can only call "work" is a
+    -- pause you cannot do anything with afterwards: the question people
+    -- actually ask is how long something took, and an hour attached to nothing
+    -- answers it for nothing.
+    project       TEXT    NOT NULL DEFAULT '',
+    subject       TEXT    NOT NULL DEFAULT '',
+    -- And what was being worked on either side, as it stood when the question was
+    -- answered. Kept with the answer rather than looked up later: the rules
+    -- move, and the point of the exercise is whether "the same project on both
+    -- sides" predicted the answer *at the time*.
+    left_project  TEXT    NOT NULL DEFAULT '',
+    right_project TEXT    NOT NULL DEFAULT '',
+    answered_at   TEXT    NOT NULL,
+    PRIMARY KEY (day, from_ts, to_ts)
+);
+
+-- A confirmed day: the result frozen, not the events.
+--
+-- Rules run when a report is built, so one edit to the dictionary renames a
+-- year of history — which is right for history nobody has looked at and wrong
+-- for a day whose numbers have already been acted on. Confirming a day writes
+-- the answer down; `report` reads it back instead of computing it again.
+--
+-- The settings are stored with it because they are part of the answer: a day
+-- computed with a ten minute clustering threshold is a different day from the
+-- same events at twenty, and in six months nobody remembers which was in force.
+CREATE TABLE IF NOT EXISTS confirmed_day (
+    day                 TEXT PRIMARY KEY,
+    confirmed_at        TEXT    NOT NULL,
+    -- The dictionary this was computed against. When it stops matching the
+    -- config, the report says the rules have moved rather than quietly
+    -- disagreeing with them for ever.
+    config_hash         TEXT    NOT NULL,
+    spoor_version       TEXT    NOT NULL,
+    cluster_gap_ms      INTEGER NOT NULL,
+    attention_window_ms INTEGER NOT NULL,
+    head_ms             INTEGER NOT NULL,
+    tail_ms             INTEGER NOT NULL,
+    count_background    INTEGER NOT NULL,
+    -- How much of the day rests on the weakest rule there is: a block with no
+    -- name of its own and a named block on one side only. The report counts it
+    -- out loud, so a confirmed day has to carry it or the line disappears the
+    -- moment a day is frozen.
+    one_neighbour_ms    INTEGER NOT NULL DEFAULT 0,
+    -- Time between blocks that the person said was work. Never part of the
+    -- day's active time: nothing measured anything there, and one number made
+    -- of a measurement and an answer is a number nobody can check. Carried so
+    -- that a frozen day keeps the line a live one prints.
+    claimed_ms          INTEGER NOT NULL DEFAULT 0,
+    questions_total     INTEGER NOT NULL,
+    questions_answered  INTEGER NOT NULL,
+    one_off_count       INTEGER NOT NULL
+);
+
+-- The partition of a confirmed day's active time: the timeline, and the only
+-- thing it is safe to read one as.
+--
+-- ground is not kept for the program. It is what lets somebody ask, months
+-- later, what this half hour rests on — a rule they wrote, a guess from a
+-- directory name, the block next door, or their own hand.
+CREATE TABLE IF NOT EXISTS confirmed_stretch (
+    day      TEXT    NOT NULL,
+    from_ts  TEXT    NOT NULL,
+    to_ts    TEXT    NOT NULL,
+    project  TEXT    NOT NULL DEFAULT '',   -- '' = no project
+    subject  TEXT    NOT NULL DEFAULT '',   -- '' = the rest of the project
+    kind     TEXT    NOT NULL,              -- attention | background | padding
+    ground   TEXT    NOT NULL,              -- rule | fallback | inherited |
+                                            -- neighbours | one-neighbour |
+                                            -- manual | one-off | '' (none)
+    PRIMARY KEY (day, from_ts)
+);
+
+-- The rows of a confirmed day.
+--
+-- agent and wall are here rather than derived from the stretches because they
+-- are not a partition of anything: two chat windows can be busy in the same
+-- second, so both can exceed the length of a day, on purpose.
+CREATE TABLE IF NOT EXISTS confirmed_row (
+    day           TEXT    NOT NULL,
+    project       TEXT    NOT NULL DEFAULT '',
+    subject       TEXT    NOT NULL DEFAULT '',
+    work          INTEGER,                  -- 1 | 0 | NULL = not said
+    -- How many traces carry this row. The evidence *behind* the count — which
+    -- hosts, which directories — is deliberately not copied here: it is in the
+    -- events table, where it always was, and a snapshot of the answer is not a
+    -- snapshot of everything that led to it. `report --recompute` shows it.
+    events        INTEGER NOT NULL DEFAULT 0,
+    attention_ms  INTEGER NOT NULL,
+    -- Time between blocks the person said belonged to this row, from the
+    -- window_answer table above. Never part of attention or background:
+    -- nothing measured it, and one number made of a measurement and somebody's
+    -- recollection is a number nobody can check. Its own column for the same
+    -- reason it is its own line in the report.
+    claimed_ms    INTEGER NOT NULL DEFAULT 0,
+    background_ms INTEGER NOT NULL,
+    padding_ms    INTEGER NOT NULL,
+    agent_ms      INTEGER NOT NULL,
+    wall_ms       INTEGER NOT NULL,
+    PRIMARY KEY (day, project, subject)
+);
+
+-- The assignments in a confirmed day that could not become rules, copied here
+-- when the day was frozen.
+--
+-- A copy rather than a reference, because a snapshot that reads through to a
+-- live table is not a snapshot. And a table of its own rather than a column,
+-- because the number of them is worth printing: a row resting on a rule and a
+-- row resting on somebody's hand look identical a month later.
+CREATE TABLE IF NOT EXISTS confirmed_one_off (
+    day      TEXT    NOT NULL,
+    from_ts  TEXT    NOT NULL,
+    to_ts    TEXT    NOT NULL,
+    project  TEXT    NOT NULL DEFAULT '',
+    subject  TEXT    NOT NULL DEFAULT '',
+    reason   TEXT    NOT NULL,              -- why no rule could have been written
+    -- Keyed like the assignment table it is copied from. Two answers can
+    -- legitimately start at the same minute and end at different ones —
+    -- somebody widening a correction — and a narrower key here would make the
+    -- day impossible to confirm at all, with a bare UNIQUE error and a row to
+    -- find by hand.
+    PRIMARY KEY (day, from_ts, to_ts)
+);
 
 -- Import bookkeeping. Source files are read incrementally, but not all of
 -- them the same way, because not all of them are appended to:

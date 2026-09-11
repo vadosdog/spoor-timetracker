@@ -356,3 +356,38 @@ func TestTildeInURLFileIsExpanded(t *testing.T) {
 		t.Errorf("the path was used unexpanded:\n%s", out)
 	}
 }
+
+// A series spoor stopped expanding is counted on the skipped: line, and the
+// line is printed because of it.
+//
+// The counter was added to the line and not to the sum that decides whether
+// the line appears, so a feed whose only refusal was a series cut short
+// printed no line at all. That is the counter that means "spoor did not
+// understand the whole of this" — the one the delete guard reads, and the one
+// worth seeing.
+func TestASeriesCutShortIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	// An hourly series with no end, over a window wide enough to hit the cap on
+	// how many occurrences one entry may produce.
+	start := time.Now().AddDate(0, 0, -1)
+	body := fmt.Sprintf("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"+
+		"UID:daily-1@example.invalid\r\nSUMMARY:Standup\r\n"+
+		"RRULE:FREQ=HOURLY\r\nDTSTART:%s\r\nDTEND:%s\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+		start.UTC().Format("20060102T150405Z"),
+		start.Add(15*time.Minute).UTC().Format("20060102T150405Z"))
+	feed := filepath.Join(dir, "daily.ics")
+	if err := os.WriteFile(feed, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := writeConfig(t, dir, "calendar:\n  sources:\n    - id: work\n      file: "+feed+"\n")
+
+	out, _ := runBoth(t, "ingest", "--db", filepath.Join(dir, "spoor.db"),
+		"--claude-dir", t.TempDir(), "--config", cfg, "--no-browser",
+		"--calendar-forward", "20000h")
+	if !strings.Contains(out, "skipped:") {
+		t.Fatalf("nothing was said about what the feed cost:\n%s", out)
+	}
+	if !strings.Contains(out, "1 cut short") {
+		t.Errorf("the series cut short was not counted:\n%s", out)
+	}
+}

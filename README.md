@@ -29,8 +29,12 @@ a week went on: projects, hours, and the evidence for each. Which project
 something belongs to is decided by a dictionary you write in the config file:
 directory paths, browser keys, git branches and page titles. Below a project
 sits one more level, for the thing that spans weeks — an episode, a level, a
-feature, a ticket. What no rule covers is still named by guesswork, and there
-is no interface yet for correcting a block by hand.
+feature, a ticket.
+
+`spoor confirm` walks a day in the terminal: it asks about what the rules could
+not name, takes the answer as a line of the dictionary so the same question is
+not asked twice, and freezes the result so that day's numbers stop moving.
+Everything it does is also a flag.
 
 [docs/status.md](docs/status.md) says where the work stopped, and lists the
 known rough edges — read it before filing a bug, because the thing you found
@@ -46,25 +50,27 @@ where it now is.
 
 **Next**
 
-- **Confirming the day.** A terminal interface: walk the blocks, name what the
-  rules could not, and have that answer stored as a rule, so the same question
-  is not asked twice. Everything it does stays available as flags.
+- git and file modification times as sources. git earns its place through
+  attribution rather than hours: a commit is a point in time, not an interval.
 
 **Done since this list was written**
 
+- **Confirming a day.** `spoor confirm` — the terminal interface, the answers
+  written back as rules, and the frozen snapshot a report reads instead of
+  recomputing. `spoor export` writes a confirmed day out as markdown.
 - **The calendar**, as a source. It reads a private iCalendar feed, or a
   downloaded `.ics`, and turns meetings into intervals of the day. The network
   call is explicit and off by default: see [Network](#network).
 
 **Later**
 
-- git and file modification times as sources. git earns its place through
-  attribution rather than hours: a commit is a point in time, not an interval.
 - Sources as external plugins — a date range in, JSON events out — so a source
   nobody else needs can live outside this repository.
 - Optional human-readable descriptions of a block. Off by default, local model
   first, and the tool keeps working with the network mode never enabled.
-- Export and import, plus a complaint when no import has run for a while.
+- Exporting and re-importing the **database**, plus a complaint when no import
+  has run for a while. (`spoor export` above writes a day out for a person to
+  read; this is the other kind.)
   Until that exists the caveat under [Uninstall](#uninstall) stands.
 
 Not planned: a Jira or Confluence integration. Both are used through the
@@ -85,8 +91,9 @@ ever need writing *back*, which is a different thing entirely.
   title and how long it ran, and the address fields described in the next
   point. The text of your conversations, of tool results and of attachments
   is never stored — a boundary of the project, not
-  a setting. Step 6 below shows you every column there is, so you can check
-  that instead of trusting this paragraph.
+  a setting. Step 6 below prints every column of every table there is, most of
+  them with the comment saying what they hold, so you can check that instead of
+  trusting this paragraph.
 - **No URLs.** From your browsing history `spoor` keeps the host, the port,
   the *first* path segment, the page title and the time. Never the query
   string, never the fragment, never a second path segment — that is where
@@ -202,7 +209,7 @@ or point it at a calendar you are happy to have on disk.
 `ingest` prints a line saying what it threw away:
 
 ```
-  skipped: 3 cancelled, 12 all-day, 1 marked free, 2 declined, 0 with no length, 0 longer than a day, 0 not expanded, 0 unreadable
+  skipped: 3 cancelled, 12 all-day, 1 marked free, 2 declined, 0 with no length, 0 longer than a day, 0 not expanded, 0 cut short, 0 unreadable
 ```
 
 Cancelled meetings, meetings you declined, and anything the calendar itself
@@ -215,13 +222,23 @@ through. If that count looks too big, that is the number telling you so.
 A timed entry with no length at all is a reminder rather than an interval, and
 is skipped for that reason.
 
-The last two are different from the rest, and from each other. `not expanded`
-is a repeating meeting whose repetition rule this version will not guess at:
-the entry is fine, the whole series is simply absent. `unreadable` is an entry
-this parser could not use at all — a date it cannot read, a missing or absurd
-identifier, a rule that would remove occurrences. Either way that entry costs
-only itself, the rest of the feed is still imported, and the reason is printed
-on a `warning:` line beside the counts.
+The last three are different from the rest, and from each other. They are not
+the calendar saying a meeting did not happen — they are spoor failing to read
+one, which is why they are counted apart and why the next paragraph matters.
+
+`not expanded` is a repeating meeting whose repetition rule this version will
+not guess at: the entry is fine, the whole series is simply absent. `cut short`
+is a repeating meeting spoor did start expanding and stopped, because the
+series hit one of the limits on how many occurrences one entry may produce —
+the meetings before the limit are there, the ones after it are not. And
+`unreadable` is an entry this parser could not use at all — a date it cannot
+read, a missing or absurd identifier, a rule that would remove occurrences.
+
+Any of the three costs only that entry; the rest of the feed is still imported,
+and the reason is printed on a `warning:` line beside the counts. What they
+also do is stop the import from taking meetings *away*: a calendar restates its
+window on every run, so a run that did not understand the whole of what it was
+given deletes nothing at all, and says so instead.
 
 A feed that cannot be read at all — the download stopped early, the server
 sent a login page instead, the address was reset — is refused whole rather than
@@ -283,9 +300,22 @@ spoor ingest [--db PATH] [--config PATH] [--claude-dir PATH]
 spoor report [--day[=YYYY-MM-DD] | --week[=YYYY-MM-DD]] [--json | --table]
              [--timeline] [--subject NAME] [--unmatched]
              [--min 5m] [--gap 10m] [--attention-window 5m]
-             [--head 2m] [--tail 2m] [--count-background]
+             [--head 2m] [--tail 2m] [--count-background] [--recompute]
              [--db PATH] [--config PATH]
 spoor count  [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--source NAME] [--db PATH]
+spoor confirm [--day[=YYYY-MM-DD]] [--questions [--json]] [--yes]
+              [--reconfirm] [--list] [--count-background]
+              [--windows [--json]]
+              [--window HH:MM-HH:MM --worked true|false
+               [--window-project NAME [--window-subject NAME]]]
+              [--db PATH] [--config PATH]
+spoor assign  [--day[=YYYY-MM-DD]]
+              (--trace KIND:VALUE | --from HH:MM --to HH:MM --one-off)
+              [--project NAME] [--subject NAME] [--never] [--ambiguous]
+              [--title EXPR] [--since] [--work true|false] [--dry-run]
+              [--db PATH] [--config PATH]
+spoor export  [--day[=YYYY-MM-DD]] [--format markdown] [--out PATH]
+              [--timeline] [--unconfirmed] [--db PATH] [--config PATH]
 spoor add-calendar <id>
 spoor version
 ```
@@ -295,9 +325,11 @@ spoor version
 **`ingest`** imports what is new and leaves the rest alone: importing the same
 data twice changes nothing. Run it regularly — the two local sources erase
 themselves, and only what has been imported survives that. See
-[Uninstall](#uninstall) for how long each one keeps. A calendar feed does not
-erase itself, but it goes stale in a different way: a meeting that was moved
-after it was imported keeps its old time, because nothing deletes rows.
+[Uninstall](#uninstall) for how long each one keeps. A calendar feed does not erase
+itself and does not only grow: it restates. So the calendar is the one source
+that replaces what it said last time rather than adding to it, and a meeting
+that was moved, renamed or cancelled is corrected on the next run. `ingest`
+prints how many were moved and how many are no longer in the feed.
 
 `--browser-history` names a history database to read *instead of* searching
 the usual places, and may be given more than once. It also replaces the
@@ -561,6 +593,176 @@ would run past midnight is cut there: a day holds at most a day. Anything
 longer than a day is not imported at all — see what it skips, under
 [Network](#network).
 
+**`confirm`** is the day you agree with. It and `assign` are the two commands
+that write to your config file.
+
+It opens on a queue of questions, busiest first. A question is about a *trace* —
+a working directory, a browser key — rather than about a block: one uncovered
+key seen in eight places is one question, because the answer closes all eight.
+Where the segments of a host separate nothing, the question is about the host,
+so fifteen segments are one question rather than fifteen. The screen says how
+much of the day turns on the trace, where in the day it turned up, what was on
+either side of it, **what the pages were called**, and **what it counts for
+now** — that last one because a key
+already inherited correctly and a key leaking into the busiest project nearby
+look identical without it.
+
+**Naming a subject names the project too.** A subject is only looked at once a
+project has matched, so a rule filed under the subject and nowhere else names
+neither — and the same question comes back the next day. Answering with both
+writes the trace under both, unless the project already names it.
+
+The answer is a project and, optionally, a subject inside it; both can be
+created on the spot. Two more cost a single keystroke each: **this names
+nothing**, for a search engine or a wiki root, and **no rule can name this**,
+for a trace that does name a subject and never the same one twice — the second
+is what puts a trace on the `ambiguous` list, and every later visit to it is
+then a short question of its own — which subject this one was — with no further
+question about the trace itself.
+
+A key question can also be answered **name it by the page title**, which is
+what a repository host needs: the key there is the host and the account,
+because the repository name is a path segment `spoor` deliberately does not
+store. It is in the title, which the screen shows under `SEEN AS`, and that is
+what this answer writes the rule from.
+
+**Every edit is then asked what it is**, in one keystroke:
+
+| | what it does |
+|---|---|
+| this block only | no rule; nothing else moves |
+| a rule | rules run when a report is built, so every day not yet confirmed is renamed |
+| a rule from the day you are looking at | the same, forward only — everything before that day keeps the name it had |
+
+The third exists because rules change in time. The same directory was one
+project six months ago and is another now, and an undated rule says it always
+was this one. The date written is **the day being confirmed**, not the day you
+are sitting at: confirming Monday on Wednesday dates the rule to Monday, so
+Monday and Tuesday move with it and the week before does not.
+
+Which of the three an edit is cannot be deduced from the edit, so it is asked
+every time rather than configured once.
+
+**A shortcut is a place on the keyboard, not a letter.** `t` and `е` are the
+same key and do the same thing, and so is every other pair on a ЙЦУКЕН layout
+over QWERTY — switching layouts to press one letter, and switching back, is a
+tax on the one loop that has to fit in two minutes. Typed text is untouched: a
+project called `модель ЗП` is typed the way it is spelled.
+
+Nothing is written before it is shown. The line that will go into the config is
+printed first, and afterwards the day is recomputed and the difference printed —
+`payments-api +1:12, no project −1:12`. A rule that moved no time says so, because
+that is either a rule something more specific already refuses or a rule on a
+trace nobody touches, and both look exactly like a rule that worked.
+
+**The pauses between blocks are part of closing the day.** After the questions,
+and after the short one-visit questions an `ambiguous` trace raises, `confirm`
+walks them one at a time — `w` jumps there
+directly, and a day whose pauses are all answered does not stop on them again.
+
+A pause takes the same four answers a question does — `enter` attach it to what
+is selected, `tab` move between the project and the subject, `N` make a new
+one, `n` it was not work — and so does a block you opened with `b`. The other
+three screens have less to say and show fewer keys: the day, the background
+line, and the one visit an `ambiguous` trace raises.
+
+**A pause is never asked to become a rule.** It has no trace at all; that is
+what makes it a pause, and there is nothing a rule could be written on. So the
+"what is this edit" question every other correction is asked does not appear
+here, and nothing an answer here does reaches your config file.
+
+What a pause *was* is the one question nothing on this machine can answer — a
+cigarette and a meeting leave the same absence of traces — so the tool shows
+the pause, shows what was on either side of it, and lets you say.
+
+What the answer buys is **a line of its own**: `pauses you called work`, in the
+report, in `--json`, in an export and against the project it was attached to.
+On the schedule the pause is marked `— you called this work —` where it would
+otherwise say `— nothing —`.
+It is never added to `attention`, to `active` or to the coverage figure, and
+nothing about the measured day moves — for the same reason the background line
+works that way. One number made of a measurement and somebody's recollection is
+a number nobody can check.
+
+**A confirmed day still opens for them.** `spoor confirm --day=D` on a frozen
+day says so and lands on the pauses, which are the only thing left that can be
+answered — nothing they record is a measurement, so locking them behind
+`--reconfirm` would mean throwing a snapshot away to answer a question that
+does not touch it.
+
+Without a terminal: `confirm --windows` lists them, `--windows --json` as a
+document, and `confirm --window=14:05-14:22 --worked=true --window-project=NAME
+[--window-subject=NAME]` answers one.
+
+Bare `confirm` refuses to start without a terminal and names the two flags that
+work anywhere. `--questions` prints the queue instead of opening the terminal,
+`--json` as a document. `--yes` confirms the day as it stands. `--list` prints
+the confirmed days and which of them the rules have moved under since.
+
+A confirmed day carries the answer and not the evidence: the projects, the
+subjects, the four numbers, and the day cut into stretches with what each one
+rests on. The `ON WHAT GROUNDS` column is empty for it, and `--json` carries no blocks,
+sources or browser keys — those live in the events table, where they always
+did, and `report --recompute` shows them. The event counts are kept.
+
+Confirming freezes the **result**, not the events. `report --day` then reads
+the snapshot rather than computing it, so a day you have already acted on stops
+moving when a rule changes. Importing into a confirmed day is not forbidden —
+the events land, the day does not move. `spoor report --day=D --recompute` shows what the rules
+would say now without writing anything, and `spoor confirm --day=D --reconfirm`
+reopens the day.
+
+**`assign`** is one answer without the terminal, through the same code:
+
+```
+spoor assign --day=2026-09-08 --trace key:example.com/issues --project Widgets
+spoor assign --day=2026-09-08 --trace path:~/src/thing --never
+spoor assign --day=2026-09-08 --trace path:~/src/thing --project Widgets --since
+spoor assign --day=2026-09-08 --from 14:05 --to 14:22 --project Widgets --one-off
+```
+
+`--trace` takes `path:`, `key:`, `branch:` and `title:` — the four kinds of
+rule. The first two are what the queue asks about, because they are the two
+that can be listed; the other two are there so that a rule the terminal offers
+can also be written by hand.
+
+`assign` refuses a day that has been confirmed, whichever form it is used in,
+and says which command reopens it: a frozen day is frozen against its own
+author too. `confirm` on a frozen day opens the pauses instead, as above.
+
+`--dry-run` prints the line and writes nothing. An answer about a stretch of one
+day cannot become a rule and has to say so with `--one-off`; those are counted,
+and the count is printed when the day is confirmed, because hand marking that
+nobody can see is hand marking nobody revisits.
+
+**`export`** writes a confirmed day out. One format today, `markdown`.
+`--timeline` adds the schedule, and it is the stored partition rather than the
+report's: one row per stretch with one answer to every question, which on a
+working day is tens of rows where `report --timeline` prints a dozen.
+`--unconfirmed` exports a day that has not been confirmed and marks it as
+provisional on the page. **No trace is printed in an export** — no host, no
+directory, no page title. This is the first thing that leaves the tool, and the
+title of a search results page is the search query.
+
+Two exceptions, both deliberate, both yours to turn off:
+
+A project no rule names keeps the guess its working directory gave it, and that
+guess is the last element of a path. It is printed, because it is the name that
+project has in every other view and an export that renamed it would be a
+different document about the same day. `fallback: none` turns the guess off,
+and naming the project removes it; both are one line, and both are the decision
+you already made for the report.
+
+And a subject with no name takes it from the first capture group of its own
+expression — `titles: '\b([A-Z]+-\d+)\b'` makes the ticket number the
+subject. That is the point of the shape and it is why it is offered, but what
+lands in the column is a piece of text off a page title, so an expression
+loose enough to capture half a title will put half a title in the export.
+Nothing here guesses that for you: the expression is one you wrote, and what it
+captures on a page you did not have in mind is the thing to check. Naming the
+subject removes it — a named subject stores the name you gave it and never the
+text it matched.
+
 **`version`** prints `dev` unless the binary was built with `just build`, which
 stamps the version from git.
 
@@ -571,7 +773,7 @@ Everything follows the XDG base directory spec:
 | What | Where | Override |
 |---|---|---|
 | Database | `~/.local/share/spoor/spoor.db` | `SPOOR_DB`, `XDG_DATA_HOME` |
-| Config, optional — nothing writes it | `~/.config/spoor/config.yaml` | `--config`, `SPOOR_CONFIG`, `XDG_CONFIG_HOME` |
+| Config, optional; `confirm` and `assign` add rules to it | `~/.config/spoor/config.yaml` | `--config`, `SPOOR_CONFIG`, `XDG_CONFIG_HOME` |
 | Calendar URLs, written by `add-calendar` | `~/.config/spoor/calendars/<id>` | `url_file:`, `XDG_CONFIG_HOME` |
 | Claude Code logs, never written to | `~/.claude/projects/` | `--claude-dir`, or `CLAUDE_CONFIG_DIR` (read as `$CLAUDE_CONFIG_DIR/projects`) |
 | Chrome profiles, copied not opened | `~/.config/google-chrome/*/History` | `--browser-history` |
@@ -598,10 +800,24 @@ yours differs.
 
 ## The config file
 
-There is no config file until you make one, and `spoor` never writes it. It
-holds four sections today — the browser source, the calendar source, the
-thresholds the report is built on, and the dictionary that says which project
-something belongs to:
+There is no config file until you make one. Two commands write to it —
+`spoor confirm` and `spoor assign` add rules to its `attribution` section, and
+create the file if it is not there; every other command only reads it. It holds
+four sections today: the browser source, the calendar source, the thresholds
+the report is built on, and the dictionary that says which project something
+belongs to.
+
+What they write, they write carefully. The file is located with a YAML parser
+and edited as text, so comments, order and the shape of every list somebody
+chose come back exactly as they were, and the only lines that change are the
+ones that were added. The one exception is a rule written as a single value
+rather than a list — `paths: ~/src/thing` — which has to become a list to hold
+a second entry; its value is carried across unchanged, and the
+formatting of that one line is not: the comment on it, if there was one, ends
+up above the list rather than beside the value. A copy is kept beside the file
+before the first write of a session, the write is atomic, the permissions are
+the ones that were there, and a file that changed on disk since `spoor` read it
+is refused rather than overwritten.
 
 ```yaml
 # ~/.config/spoor/config.yaml
@@ -656,6 +872,13 @@ attribution:
   never:
     keys:  [www.example.com]
     paths: [~/scratch]
+  # Traces that do name a subject and never the same one twice: an operations
+  # console is checking what you shipped one hour and a fire the next. No rule
+  # separates those, so no rule tries. min_split is how long a visit has to be
+  # before it is worth asking about at all; 0 means zero, not "the default".
+  ambiguous:
+    min_split: 5m
+    keys: [ops.example.com]
   # One line for every ticket there will ever be: no name, so whatever the
   # capture group matches becomes the subject.
   subjects:
@@ -663,13 +886,29 @@ attribution:
   projects:
     - name: payments-api
       work: true
-      # The directory and everything under it.
-      paths: ~/src/payments-api
       # host[:port][/first-segment], as the report prints it.
       keys: git.example.com
       # A regular expression over the page title.
       titles: 'payments-api'
+      # A directory and everything under it. ~/src/shared was this project
+      # until the tenth; see billing below.
+      paths:
+        - ~/src/payments-api
+        - ~/src/shared
+    - name: billing
+      # ~/src/shared moved here on the tenth. See below.
+      paths:
+        - {value: ~/src/shared, since: 2026-09-10}
 ```
+
+**A dated rule beats an undated one of the same specificity**, and between two
+dated ones the later start wins. So "this directory is X, and Y from the tenth"
+is two entries and needs no end date on the first: before the tenth the dated
+rule does not apply, from the tenth it wins the tie.
+
+`{value: ..., since: ...}` stands in for a bare value in any of the four lists
+a rule can be written on — `paths`, `keys`, `branches`, `titles` — and in the
+two lists of `never` and `ambiguous`, which take `keys` and `paths` only.
 
 Every key under `report` is also a flag on `spoor report` — `--gap`,
 `--attention-window`, `--head`, `--tail`, `--count-background` — and the flag
@@ -737,8 +976,25 @@ path beats a shorter one and a longer key beats a shorter one, so
 `app.example.com/salary` can belong to one project while the rest of
 `app.example.com` belongs to another. A literal beats a regular expression:
 where something happened is better evidence than what a piece of text looked
-like. Between two expressions there is nothing to compare, so the order they
-are written in decides, always the same way.
+like. Where two rules are equally specific, the one with a later `since` wins,
+and an undated rule counts as the earliest there is. Between two expressions
+that are equal on all of those there is nothing left to compare, so the order
+they are written in decides, always the same way.
+
+**`ambiguous`** is the second decision a trace can get, and it is not
+`never`. `never` says the trace names no project. This says the trace does name
+a subject and never the same one twice: the host of an operations console is
+checking what you shipped one hour and a fire the next, and no rule separates
+those.
+
+So what is decided here is "no rule can name this", once and for all — that
+question is never asked again. Each later *visit* is a short question of its
+own, with the subject you were on either side of it offered first and the
+project's other subjects under it, and the answer lives in that day rather than
+in this file. `min_split` is how long a visit has to be before it is worth
+asking about at all; below it the time stays with whatever you were on around
+it. It defaults to five minutes — one person's measurement of their own days —
+and `0` there means zero rather than "the default".
 
 **`fallback`** says what happens to a Claude Code event no rule names:
 `cwd-basename`, the default, keeps the guess so that adding a first rule
@@ -803,7 +1059,7 @@ Three things follow, and each is there for a reason:
   is a plain string prefix, exactly as it is under a project — `~/scratch*` on
   its own would take `~/scratchpad` and `~/scratch-notes` with it, and say
   nothing about having done so;
-- **it loses to a more specific rule of its own kind.** `never` on `/home/you`
+- **it loses to a more specific rule of its own kind.** `never` on `/home/u`
   does not take away a rule on the one checkout inside it, and a bare host
   under `never` does not take away `keys: docs.that-host`. Conversely a
   narrower `never` carves a segment out of a broader rule — `never` on
@@ -1017,8 +1273,11 @@ spoor version
 spoor ingest
 ```
 
-Expect two lines per source, three for a calendar that skipped something it
-found, then the total — five lines with both
+Expect two lines per source. A calendar adds up to two more, in this order:
+`restated:` when it has moved, renamed or dropped a meeting since the last run,
+and `skipped:` when it refused something it found. Neither is a fault —
+a calendar does not append like the other two sources, it restates, so
+correcting a meeting is the normal case. Then the total — five lines with both
 Claude Code and a browser installed, in this shape:
 
 ```
@@ -1030,7 +1289,7 @@ database: 22800 events total
 ```
 
 The numbers above are made up; yours will be your own. A month of session
-logs and 90 days of browsing take a second or two together. Extra lines
+logs and 90 days of browsing take a second or two together. Other extra lines
 appear only when a source dropped something — an unreadable line, or a meeting
 the calendar skipped — and **a source that found nothing
 to read is not mentioned at all** — with only one of those two installed you get
@@ -1042,7 +1301,12 @@ three lines, not five, and that is not a fault.
 spoor ingest
 ```
 
-Expect `(0 read, N unchanged)`, `0 new`, the same total as before, and no
+Expect `(0 read, N unchanged)`, `0 new` — on the two local sources. A calendar
+is different and always will be: it is fetched and re-read every run, so it
+reports `(1 read)` every time and has no `unchanged` count at all. What to look
+for there is `0 new` and **no** `restated:` line; that line is printed only
+when something actually moved. Otherwise, expect `(0 read, N unchanged)`,
+`0 new`, the same total as before, and no
 measurable delay — on every source line you got in step 2. A non-zero `new`
 is not necessarily a bug: if you kept working — or kept browsing — between
 the two runs, there was something new to import. Run it a third time; that
@@ -1092,10 +1356,61 @@ sqlite3 -line ~/.local/share/spoor/spoor.db \
   'SELECT * FROM events ORDER BY ts DESC LIMIT 3'
 ```
 
-That is the whole record. No other table holds event data — `source_files` is
-import bookkeeping: paths, sizes, read offsets and how far each browser
-profile has been read, no event content. The shorter queries below only trim
-the view; they hide nothing.
+That is the whole record of one event. Seven other tables exist; this prints every
+column of every one of them, with the comments that sit beside them:
+
+```
+python3 -c "import sqlite3,os;d=os.path.expanduser('~/.local/share/spoor/spoor.db');\
+print('\n\n'.join(r[0] for r in sqlite3.connect('file:'+d+'?mode=ro',uri=True).execute(\
+\"SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name\")))"
+```
+
+```
+sqlite3 ~/.local/share/spoor/spoor.db "SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name;"
+```
+
+What they are, in one line each:
+
+- `source_files` — import bookkeeping: paths, sizes, read offsets and how far
+  each browser profile has been read. No event content.
+- `assignment` and `confirmed_one_off` — what you typed when you corrected a
+  stretch of a day by hand: a time, a project name and a subject name. The
+  `reason` column beside them is spoor's own note of which answer put the row
+  there ("answered for this block only"), one of a handful of fixed sentences,
+  never anything you wrote.
+- `window_answer` — what you said about a pause between blocks: whether it was
+  work, what it was, and what you were on either side of it.
+- `confirmed_day`, `confirmed_stretch` and `confirmed_row` — the days you
+  confirmed: the settings they were computed with, the day cut into stretches
+  with a project and a subject on each, and the table you agreed with.
+
+Every name in all of them is one you wrote in the config or typed into the
+terminal, with three exceptions. `source_files` holds the paths of the files
+that were read, which spoor found for itself. A project no rule names keeps
+`basename(cwd)`, so a directory name can appear as a project name. And a
+subject with no name of its own takes it from the first capture group of its
+expression, so a piece of a page title can land in a subject column — that one
+is the shape [Subjects](#subjects) recommends, and it stores what your
+expression captured rather than what you typed. `fallback: none` removes the
+second; naming the subject removes the third. Both are also the two exceptions
+the export carries, for the same reason.
+
+To read one of those tables in full, with nothing trimmed — the name at the end
+is the table, and `confirmed_row` is the one to start with, since it is the day
+you filed:
+
+```
+python3 -c "import sqlite3,os,sys;d=os.path.expanduser('~/.local/share/spoor/spoor.db');\
+c=sqlite3.connect('file:'+d+'?mode=ro',uri=True);t=sys.argv[1];\
+print(*[dict(zip([x[0] for x in c.execute('SELECT * FROM '+t).description],r)) for r in \
+c.execute('SELECT * FROM '+t)],sep='\n')" confirmed_row
+```
+
+```
+sqlite3 -header ~/.local/share/spoor/spoor.db "SELECT * FROM confirmed_row;"
+```
+
+The shorter queries below only trim the view; they hide nothing.
 
 Now the readable summary:
 
@@ -1297,12 +1612,12 @@ files.
 **Before you do: the database is the only copy.** Claude Code deletes its own
 session logs after 30 days by default and Chrome keeps 90 days of history, so
 everything imported from further back than that exists nowhere else on the
-machine. There is no undo, and there is no export either — if the history
+machine. There is no undo, and there is no way to export the database either — if the history
 matters to you, `spoor.db` belongs in whatever backup you already run.
 
 ```
 rm -rf ~/.local/share/spoor    # the database and its -wal / -shm files
-rm -rf ~/.config/spoor         # config.yaml, and calendars/ if you used add-calendar
+rm -rf ~/.config/spoor         # config.yaml and config.yaml.bak, and calendars/ if you used add-calendar
 rm -f  ~/.local/bin/spoor      # the binary, wherever you put it
 ```
 
@@ -1311,11 +1626,12 @@ real path with the `echo` above before deleting anything. A custom `SPOOR_DB`
 names the file rather than a directory, so remove its `-wal` and `-shm`
 siblings alongside it.
 
-`spoor add-calendar` is the one thing that writes under `~/.config/spoor`, and
-what it writes is a calendar URL — a bearer credential that reads your whole
-calendar and does not expire. Remove that directory even if you are only
-reinstalling, and if you are giving the machine away, reset the address in your
-calendar's own settings as well.
+`spoor add-calendar`, `spoor confirm` and `spoor assign` are what write under
+`~/.config/spoor`. The first writes a calendar URL — a bearer credential that
+reads your whole calendar and does not expire. The other two add rules to
+`config.yaml` and keep one `config.yaml.bak` beside it. If you are giving the
+machine away, reset the address in your calendar's own settings as well:
+deleting the file here does not revoke it.
 
 To wipe the collected data but keep using the tool, delete only the database.
 The next `spoor ingest` rebuilds it from whatever the sources have not erased

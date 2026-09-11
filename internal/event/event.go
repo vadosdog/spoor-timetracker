@@ -82,7 +82,7 @@ type Event struct {
 	//
 	// For a meeting it is also the only thing kept. Attendees are read to
 	// answer whether the user declined, and go no further; the description,
-	// the location and the conference link are not read at all.
+	// the location, the organiser and the conference link are not read at all.
 	Title string
 	// Every field carrying bytes somebody else wrote is repaired on the way
 	// in — to valid UTF-8, and free of anything that would make it display as

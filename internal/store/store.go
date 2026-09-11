@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go driver: no cgo, ever
@@ -110,6 +111,16 @@ var addedColumns = []struct{ table, column, decl string }{
 	{"events", "port", "TEXT NOT NULL DEFAULT ''"},
 	{"events", "path_head", "TEXT NOT NULL DEFAULT ''"},
 	{"events", "title", "TEXT NOT NULL DEFAULT ''"},
+	// Added to the confirmed-day tables after they first existed. Every one of
+	// these is declared in schema.sql as well — that file is what somebody
+	// reads with the database open, and a column that exists only here has no
+	// comment and no explanation. Both places, always.
+	{"confirmed_day", "one_neighbour_ms", "INTEGER NOT NULL DEFAULT 0"},
+	{"confirmed_day", "claimed_ms", "INTEGER NOT NULL DEFAULT 0"},
+	{"confirmed_row", "events", "INTEGER NOT NULL DEFAULT 0"},
+	{"confirmed_row", "claimed_ms", "INTEGER NOT NULL DEFAULT 0"},
+	{"window_answer", "project", "TEXT NOT NULL DEFAULT ''"},
+	{"window_answer", "subject", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // addedIndexes are indexes that arrived after the table first shipped. Unlike
@@ -230,6 +241,190 @@ func (s *Store) InsertEvents(events []event.Event) (int, error) {
 	return inserted, nil
 }
 
+// Window is one source instance's whole statement about one stretch of time.
+type Window struct {
+	// Source and Entrypoint name the instance whose rows may be touched.
+	// Nothing another source, or another calendar, wrote is in scope.
+	Source, Entrypoint string
+	// From and To are the stretch the source was asked about, To exclusive.
+	// Rows outside it are never touched: the source said nothing about them.
+	From, To time.Time
+	// Events is everything the source now says is in there.
+	Events []event.Event
+	// Whole says the source understood everything it was given, so what it
+	// does not restate really is gone.
+	//
+	// False stops the deleting half and nothing else: what is stated is still
+	// inserted and updated. It covers both shapes of "I did not understand" —
+	// a feed that produced nothing at all, which is also what a login page and
+	// a revoked address look like, and a feed that produced plenty while one
+	// series of it went unread. The second is the likelier of the two and was
+	// the one a first attempt at this guard did not reach, because it was only
+	// consulted when the statement was empty.
+	Whole bool
+}
+
+// WindowSync is what one call to ReplaceWindow did.
+type WindowSync struct {
+	// New is rows that were not there, Moved is rows whose time, length or
+	// title changed, Removed is rows the source no longer states.
+	New, Moved, Removed int
+	// RefusedEmpty is set when the source did not understand the whole of what
+	// it was given and the database holds rows the statement does not mention.
+	// Nothing is deleted in that case and the caller is expected to say so out
+	// loud.
+	RefusedEmpty bool
+}
+
+// ReplaceWindow makes the database say about [from, to) exactly what the
+// source now says, for one instance of one source.
+//
+// Every other import path here is append-only, and for a log that only grows
+// that is right. A calendar is the other kind of source: it does not append,
+// it restates. A meeting moved from 10:00 to 14:00 keeps its UID and therefore
+// its identity, so an insert that ignores conflicts keeps the old hour; a
+// series moved wholesale changes every occurrence key, so the new occurrences
+// arrive, the old ones stay, and the day is counted twice. Both failures are
+// silent and both are of the "quietly more than there was" kind.
+//
+// So: what the source states is inserted or updated, and what it no longer
+// states is deleted — within the window it was asked about, and for that
+// instance only. Rows outside the window are not touched, because the source
+// said nothing about them.
+//
+// ingested_at survives an update. It is when spoor first saw the meeting, and
+// rescheduling it does not make that a different fact.
+func (s *Store) ReplaceWindow(w Window) (WindowSync, error) {
+	var sync WindowSync
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return sync, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type stored struct {
+		ts       string
+		duration sql.NullInt64
+		title    string
+	}
+	existing := map[string]stored{}
+	rows, err := tx.Query(`
+		SELECT external_id, ts, duration_ms, title FROM events
+		WHERE source = ? AND entrypoint = ? AND ts >= ? AND ts < ?`,
+		w.Source, w.Entrypoint, formatTS(w.From), formatTS(w.To))
+	if err != nil {
+		return sync, err
+	}
+	for rows.Next() {
+		var id string
+		var got stored
+		if err := rows.Scan(&id, &got.ts, &got.duration, &got.title); err != nil {
+			_ = rows.Close()
+			return sync, err
+		}
+		existing[id] = got
+	}
+	if err := rows.Close(); err != nil {
+		return sync, err
+	}
+	if err := rows.Err(); err != nil {
+		return sync, err
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO events (
+			source, external_id, ts, duration_ms, type, subtype,
+			project, raw_text, session_id, cwd, git_branch,
+			entrypoint, is_sidechain, client_version,
+			host, port, path_head, title, ingested_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT (source, external_id) DO UPDATE SET
+			ts = excluded.ts,
+			duration_ms = excluded.duration_ms,
+			type = excluded.type,
+			subtype = excluded.subtype,
+			title = excluded.title`)
+	if err != nil {
+		return sync, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	ingestedAt := s.now().UTC().Format(time.RFC3339)
+	for _, e := range w.Events {
+		var duration any
+		if e.DurationMS != nil {
+			duration = *e.DurationMS
+		}
+		was, there := existing[e.ExternalID]
+		delete(existing, e.ExternalID)
+		if !there {
+			// A source may legitimately restate something that begins before
+			// the window it was asked about — a meeting that starts at 08:00
+			// and runs into a window opening at 09:00. Its row is outside the
+			// sweep, so it is not in `existing`, and counting it as new would
+			// report one more arrival on every single run for ever.
+			var got stored
+			err := tx.QueryRow(`SELECT ts, duration_ms, title FROM events WHERE source = ? AND external_id = ?`,
+				w.Source, e.ExternalID).Scan(&got.ts, &got.duration, &got.title)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+			case err != nil:
+				return sync, err
+			default:
+				was, there = got, true
+			}
+		}
+		switch {
+		case !there:
+			sync.New++
+		case was.ts != e.TS || !sameDuration(was.duration, e.DurationMS) || was.title != e.Title:
+			sync.Moved++
+		default:
+			continue // unchanged: writing it again would only churn the file
+		}
+		if _, err := stmt.Exec(
+			e.Source, e.ExternalID, e.TS, duration, e.Type, e.Subtype,
+			e.Project, e.RawText, e.SessionID, e.CWD, e.GitBranch,
+			e.Entrypoint, e.IsSidechain, e.ClientVersion,
+			e.Host, e.Port, e.PathHead, e.Title, ingestedAt,
+		); err != nil {
+			return sync, fmt.Errorf("store event %s: %w", e.ExternalID, err)
+		}
+	}
+
+	// Nothing is removed unless the source understood the whole of what it was
+	// given. This is the one operation in the program that can lose data, and
+	// the guard is on the operation rather than on a call site.
+	if !w.Whole && len(existing) > 0 {
+		sync.RefusedEmpty = true
+		return sync, tx.Commit()
+	}
+
+	del, err := tx.Prepare(`DELETE FROM events WHERE source = ? AND external_id = ?`)
+	if err != nil {
+		return sync, err
+	}
+	defer func() { _ = del.Close() }()
+	// Ranged over a map, so the order is Go's. Deletes by primary identity
+	// commute, so the result does not depend on it.
+	for id := range existing {
+		if _, err := del.Exec(w.Source, id); err != nil {
+			return sync, fmt.Errorf("remove event %s: %w", id, err)
+		}
+		sync.Removed++
+	}
+
+	return sync, tx.Commit()
+}
+
+func sameDuration(stored sql.NullInt64, incoming *int64) bool {
+	if incoming == nil {
+		return !stored.Valid
+	}
+	return stored.Valid && stored.Int64 == *incoming
+}
+
 // CountEvents counts events with from <= ts < to. Both bounds are instants;
 // turning a local day into an instant is the caller's job.
 func (s *Store) CountEvents(source string, from, to time.Time) (int, error) {
@@ -326,6 +521,52 @@ func (s *Store) Range() (first, last time.Time, ok bool, err error) {
 		return time.Time{}, time.Time{}, false, fmt.Errorf("unreadable last timestamp %q: %w", hi.String, err)
 	}
 	return first, last, true, nil
+}
+
+// TracesBefore is every working directory and browser key the database held
+// before a day, as the strings a question is keyed by.
+//
+// It answers one thing on the question screen — "first time today" — and it is
+// a query rather than a report on purpose: the answer is a set of strings, and
+// building a year of days to find out whether a host is new would be seconds
+// of work for a note.
+func (s *Store) TracesBefore(day time.Time) (map[string]bool, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT cwd, host, port, path_head FROM events WHERE ts < ?`,
+		formatTS(day))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var cwd, host, port, head string
+		if err := rows.Scan(&cwd, &host, &port, &head); err != nil {
+			return nil, err
+		}
+		if cwd != "" {
+			out["path:"+strings.TrimRight(cwd, "/")] = true
+		}
+		if host == "" {
+			continue
+		}
+		key := host
+		if strings.Contains(key, ":") {
+			key = "[" + key + "]"
+		}
+		if port != "" {
+			key += ":" + port
+		}
+		// Both the key with its segment and the bare host: a question folded
+		// by host is asked about the host, and it is not new just because
+		// today's segment is.
+		out["key:"+key] = true
+		if head != "" {
+			out["key:"+key+"/"+head] = true
+		}
+	}
+	return out, rows.Err()
 }
 
 // TotalEvents counts everything in the database.

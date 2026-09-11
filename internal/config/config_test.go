@@ -158,7 +158,7 @@ attribution:
 	if a.Fallback != FallbackNone {
 		t.Errorf("Fallback = %q, want %q", a.Fallback, FallbackNone)
 	}
-	if !reflect.DeepEqual([]string(a.Never.Keys), []string{"search.example.com"}) {
+	if !reflect.DeepEqual(a.Never.Keys.Values(), []string{"search.example.com"}) {
 		t.Errorf("Never.Keys = %v", a.Never)
 	}
 	if len(a.Projects) != 1 {
@@ -168,7 +168,7 @@ attribution:
 	if p.Work == nil || !*p.Work {
 		t.Errorf("Work = %v, want true", p.Work)
 	}
-	if !reflect.DeepEqual([]string(p.Keys), []string{"widget.example.com", "dev.example.com:3000/admin"}) {
+	if !reflect.DeepEqual(p.Keys.Values(), []string{"widget.example.com", "dev.example.com:3000/admin"}) {
 		t.Errorf("Keys = %v", p.Keys)
 	}
 	if len(p.Branches) != 1 || !p.Branches[0].MatchString("widget/thing") {
@@ -196,7 +196,7 @@ attribution:
 		t.Fatalf("scalar list: %v", err)
 	}
 	p := cfg.Attribution.Projects[0]
-	if !reflect.DeepEqual([]string(p.Paths), []string{"/src/widget"}) {
+	if !reflect.DeepEqual(p.Paths.Values(), []string{"/src/widget"}) {
 		t.Errorf("Paths = %v, want one entry", p.Paths)
 	}
 	if len(p.Titles) != 1 {
@@ -235,7 +235,7 @@ func TestNeverAcceptsBothShapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flat never: %v", err)
 	}
-	if !reflect.DeepEqual([]string(flat.Attribution.Never.Keys), []string{"a.example.com", "b.example.com"}) {
+	if !reflect.DeepEqual(flat.Attribution.Never.Keys.Values(), []string{"a.example.com", "b.example.com"}) {
 		t.Errorf("a bare list is not read as keys: %+v", flat.Attribution.Never)
 	}
 	if len(flat.Attribution.Never.Paths) != 0 {
@@ -246,10 +246,10 @@ func TestNeverAcceptsBothShapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("never with both lists: %v", err)
 	}
-	if !reflect.DeepEqual([]string(both.Attribution.Never.Keys), []string{"a.example.com"}) {
+	if !reflect.DeepEqual(both.Attribution.Never.Keys.Values(), []string{"a.example.com"}) {
 		t.Errorf("Keys = %v", both.Attribution.Never.Keys)
 	}
-	if !reflect.DeepEqual([]string(both.Attribution.Never.Paths), []string{"~/scratch", "/tmp/x"}) {
+	if !reflect.DeepEqual(both.Attribution.Never.Paths.Values(), []string{"~/scratch", "/tmp/x"}) {
 		t.Errorf("Paths = %v", both.Attribution.Never.Paths)
 	}
 }
