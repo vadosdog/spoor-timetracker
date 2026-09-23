@@ -31,8 +31,66 @@ import (
 type Config struct {
 	Browser     Browser     `yaml:"browser"`
 	Calendar    Calendar    `yaml:"calendar"`
+	Git         Git         `yaml:"git"`
 	Report      Report      `yaml:"report"`
 	Attribution Attribution `yaml:"attribution"`
+}
+
+// Git lists the repositories whose reflog is read.
+//
+// There is no discovery and there will not be one. Walking a home directory
+// for ".git" would read every repository somebody ever cloned — a colleague's
+// checkout, a vendored dependency, a tutorial — and put all of them on their
+// timeline. Which repositories are theirs is a thing only they know, so it is
+// written down.
+type Git struct {
+	Repos []GitRepo `yaml:"repos"`
+}
+
+// GitRepo is one repository.
+type GitRepo struct {
+	// ID names it, and is part of the identity of every event read from it —
+	// so two repositories must not share one. Same rule as a calendar's id,
+	// and the same reason: the second one's entries would collide on the
+	// unique index and vanish with no error and no warning.
+	ID string `yaml:"id"`
+	// Path is the working tree. It becomes the event's cwd, which means every
+	// path rule already written for a checkout covers that checkout's reflog
+	// without a second line.
+	Path string `yaml:"path"`
+}
+
+// Validate reports what is wrong with the git section.
+//
+// Fatal, like the calendar's, rather than a warning: an id that repeats or is
+// missing does not make a rule misfire, it makes a repository disappear while
+// the run reports success.
+func (g Git) Validate() (fatal []Problem, warnings []Problem) {
+	seen := map[string]int{}
+	for i, r := range g.Repos {
+		where := fmt.Sprintf("repository #%d", i+1)
+		if r.ID != "" {
+			where = fmt.Sprintf("repository %q", r.ID)
+		}
+		switch {
+		case r.ID == "":
+			fatal = append(fatal, Problem{where,
+				"has no id; the id is part of the identity of every entry read from it"})
+		case seen[r.ID] > 0:
+			fatal = append(fatal, Problem{where, fmt.Sprintf(
+				"is also the id of repository #%d; two repositories sharing an id would "+
+					"silently drop the second one's entries as duplicates", seen[r.ID])})
+		case !plainName(r.ID):
+			fatal = append(fatal, Problem{where,
+				"has an id that is not a plain name; letters, digits, '-', '_' and '.' only"})
+		}
+		seen[r.ID] = i + 1
+
+		if r.Path == "" {
+			fatal = append(fatal, Problem{where, "has no path; there is nothing to read"})
+		}
+	}
+	return fatal, warnings
 }
 
 // Calendar configures the one source that can reach the network.

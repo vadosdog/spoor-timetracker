@@ -37,6 +37,7 @@ import (
 	"github.com/vadosdog/spoor-timetracker/internal/paths"
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
+	"github.com/vadosdog/spoor-timetracker/internal/source/git"
 )
 
 // Rules is a compiled dictionary. The zero value names nothing, which is what
@@ -606,7 +607,12 @@ func targetOf(e event.Event) target {
 		t.at = ts.Local()
 	}
 	switch e.Source {
-	case claudecode.SourceName:
+	// Both sources that know where they were: a working directory and a
+	// branch. One case rather than two, because a rule is written about a
+	// directory and not about which program noticed it — the point of the git
+	// source is that the path rule somebody already wrote for a checkout
+	// covers that checkout's reflog with no second line.
+	case claudecode.SourceName, git.SourceName:
 		t.cwd = strings.TrimRight(e.CWD, "/")
 		t.branch = e.GitBranch
 	case browser.SourceName:

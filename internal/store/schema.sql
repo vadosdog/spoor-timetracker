@@ -5,19 +5,30 @@
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY,
 
-    -- Which plugin produced this: 'claude-code', 'browser' or 'calendar'.
+    -- Which plugin produced this: 'claude-code', 'browser', 'calendar' or
+    -- 'git'.
     source         TEXT    NOT NULL,
     -- The source's own identity for the event. For Claude Code it is the
     -- JSONL `uuid`; for the browser it is
     -- <flavour>/<profile>/<visit time>/<visit id>; for the calendar it is
-    -- <calendar>/<UID>/<occurrence>. Together with source it is the dedup key:
-    -- re-importing the same line can never create a second row.
+    -- <calendar>/<UID>/<occurrence>; for git it is
+    -- <repository>/<instant>/<resulting sha>. Together with source it is the
+    -- dedup key: re-importing the same line can never create a second row.
     --
     -- The calendar id is in there because an iCalendar UID is unique within
     -- one calendar and not across two: an invitation keeps the organiser's UID
     -- in every attendee's copy, so the same meeting subscribed to twice would
     -- otherwise collide on this index and the second one would be dropped with
     -- no error and no warning.
+    --
+    -- The git key is built out of the entry's *content* and not its position:
+    -- `HEAD@{0}` is renumbered by the next thing that happens, so a key made
+    -- from it would re-import a whole reflog under new identities every time
+    -- anybody committed. An instant and a resulting sha do not move — not when
+    -- the reflog is truncated, not when a rebase makes the object unreachable,
+    -- not when the branch is deleted. Which is the point: the row outlives all
+    -- three, the same way a Claude Code event outlives the JSONL file that is
+    -- erased after 30 days.
     external_id    TEXT    NOT NULL,
 
     -- When it happened. RFC3339, UTC, millisecond precision, always ending
@@ -31,25 +42,48 @@ CREATE TABLE IF NOT EXISTS events (
     -- written to disk during a call; Claude Code's system/turn_duration
     -- describes a turn that already has events at both of its ends, so
     -- counting it as a span would count the same seconds twice.
+    --
+    -- A git row never fills it, and that is a decision rather than a gap: a
+    -- commit is a point. Nothing in a repository says how long the work
+    -- before it took, so this source is not allowed to put hours on the day —
+    -- it is here for names.
     duration_ms    INTEGER,
 
     -- The source's own classification, kept verbatim.
+    -- For git, type is 'reflog' and subtype is the first word of the action —
+    -- 'commit', 'commit (amend)', 'checkout', 'rebase (finish)', 'pull'. The
+    -- first word and no more: everything after the first ': ' in a reflog
+    -- message is a commit message, which is content, and 'clone: from
+    -- https://user:token@host/x' puts a credential there too.
     type           TEXT    NOT NULL,
     subtype        TEXT    NOT NULL DEFAULT '',
 
     -- Attribution guessed at ingest time; empty when unknown.
     project        TEXT    NOT NULL DEFAULT '',
     -- Short metadata label: model, tool names, attachment kind. Never the
-    -- text of a conversation.
+    -- text of a conversation. For git it is '<old>..<new>' in git's own range
+    -- syntax, so the row can be pasted back into `git log` — and so that the
+    -- one thing this source could have stored and must not, the commit
+    -- message, is visibly not here.
     raw_text       TEXT    NOT NULL DEFAULT '',
 
     -- Claude Code core fields. Present in 100% of core rows, all clients,
     -- all versions. Kept as columns rather than a JSON blob so the database
-    -- stays readable. Empty on rows from any other source, with one
-    -- exception: entrypoint names which instance of a source produced the
-    -- trace — 'cli', 'claude-desktop' and the other clients for Claude Code,
-    -- 'chrome' or 'firefox'
-    -- for the browser, and the calendar's own id for a meeting.
+    -- stays readable. Empty on rows from any other source, with two
+    -- exceptions.
+    --
+    -- entrypoint names which instance of a source produced the trace — 'cli',
+    -- 'claude-desktop' and the other clients for Claude Code, 'chrome' or
+    -- 'firefox' for the browser, the calendar's own id for a meeting and the
+    -- repository's own id for a reflog entry.
+    --
+    -- cwd and git_branch are filled by git as well, with the repository's
+    -- working tree and the branch the entry was recorded against ('main',
+    -- 'origin/main', 'HEAD', 'stash'). Deliberately the same two columns
+    -- rather than columns of git's own: a dictionary rule is written about a
+    -- directory, not about which program noticed it, so a path rule somebody
+    -- already wrote for a checkout covers that checkout's reflog with no
+    -- second line.
     session_id     TEXT    NOT NULL DEFAULT '',
     cwd            TEXT    NOT NULL DEFAULT '',
     git_branch     TEXT    NOT NULL DEFAULT '',

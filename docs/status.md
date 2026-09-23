@@ -1604,14 +1604,133 @@ somebody answering questions, and that has not happened yet.
   `spoor report --day=D --recompute` shows what they would say now without
   writing anything. The two flags are on different commands.
 
-## Next: closing the holes with more sources
+## Stage 5 — git, the last source. Done 2026-09-23.
 
-git and file modification times, in that order. git earns its place through
-attribution rather than hours — a commit is a point in time, not an interval —
-and the measurements say the two together add less than the browser did, which
-is why they come after it rather than before.
+`internal/source/git` reads `.git/logs/**` — the reflog — for the repositories
+listed in the config, and stores one event per action: the instant, the
+repository's directory, the branch, the verb and the two short shas the ref
+moved between. No `git` binary is run, no objects are parsed, no network is
+touched.
 
-Two things from this stage want a week of use before anything is built on
+The file-modification-times source that used to sit beside git in this section
+is **not being written**, and that is a decision rather than a postponement.
+mtime has no journal: a file remembers only its last touch, so a measurement
+made backwards over accumulated history is understated the older the day is,
+and the one number that existed for it was made that way *and* against an
+empty database. There is no honest figure to be had before the source is
+written, which is the one thing this project does not do.
+
+### What this source knows about its own format
+
+- **The reflog is the whole of it, and it is enough for commits.** Every commit
+  made on this machine is a line in `.git/logs/HEAD` and in its branch's log:
+  `commit:`, `commit (amend):`, `commit (initial):`. `git log` was rejected on
+  purpose — it is a list of objects, not a journal of actions, so the author
+  date of a commit somebody else pushed says when *they* worked, and a rebase
+  rewrites dates wholesale.
+- **Every line is yours.** A reflog records what happened in this clone under
+  the local identity, `pull` included. That removes a whole configuration
+  surface — no list of addresses to match against, and no way for that list to
+  quietly match nothing.
+- **The message is never read past the verb.** Everything after the first
+  `": "` is text somebody typed: a commit message, which is content, and in
+  `clone: from https://user:token@host/x` a credential. The verb is the first
+  word plus a parenthesised qualifier, and nothing else.
+- **One action is written to several logs.** A commit lands in `logs/HEAD` and
+  in `logs/refs/heads/<branch>` with the same second and the same resulting
+  sha; a pull adds a third copy under `refs/remotes/`. They collapse to one
+  event, and the copy naming a branch is the one that survives — `HEAD` is not
+  a name any rule can be written against. On real data that was 753 copies out
+  of 3894 lines.
+- **Identity is content, never position.** `HEAD@{0}` is renumbered by the next
+  action, so a key built on it would re-import a whole reflog under new
+  identities every time anybody committed. The key is repository, instant and
+  resulting sha — none of which moves when the log is truncated, when a rebase
+  makes the object unreachable, or when the branch is deleted. Append only:
+  nothing here deletes and nothing restates.
+- **No duration, ever.** A commit is a point. Nothing in a repository says how
+  long the work before it took, and a duration in that column would invite the
+  reporting stage to turn a commit into an interval.
+- **`cwd` and `git_branch` are shared with the Claude Code source on purpose.**
+  A dictionary rule is written about a directory, not about which program
+  noticed it, so a `paths:` rule that already covers a checkout covers that
+  checkout's reflog with no second line.
+- **No discovery, and there will not be one.** Walking a home directory for
+  `.git` would read every repository somebody ever cloned. Which ones are
+  theirs is a thing only they know, so it is written down.
+
+### What it measured, and what it did not
+
+The stage asked one question: how much of the active time no rule could name
+does a branch and a directory name. Measured over the same fourteen days as
+every stage since 1.5, with the source off and on: **2.68 hours before, 2.68
+hours after. Nothing.** Every unnamed stretch was browsing and no commit fell
+inside one. The `active` total moved by 0.04 h and `span` not at all.
+
+Two numbers from the same window say why, and they are the ones that decided
+the stage:
+
+- **65% of what it produces lands where the answer is already contested.** Of
+  the 27 blocks holding a git event, 17 already carried more than one project,
+  and 140 of 215 events were in those 17. A commit cannot say which project a
+  stretch was when several are in it already, and working on several things in
+  one sitting is the normal case.
+- **The one honest use of a commit — marking what the quiet stretch before it
+  was — fired twice in fourteen days**, and both times the previous block
+  already had the same name.
+
+Where it does change the answer is on days whose other traces have expired — a
+reflog goes back years, a browser history keeps ninety days, Claude Code erases
+its logs after thirty — and there it is the only thing left that names
+anything. That is worth having once, when a database is filled in backwards,
+and 78% of it arrives on the weakest rule in the program. On days that still
+have browsing or session logs it trades unnamed time *up* by 1.6 h and
+one-neighbour time *down* by 3.4 h across 41 days.
+
+**The decision: the source stays, off unless repositories are listed, and it is
+not presented as something that works.** It did nothing for this author's data
+and the README says so in the same breath as it documents the settings. Two
+reasons it was not deleted: it is the one source already shaped like the plugin
+contract — a date range in, events out — and habits it would suit exist even
+though they are not these ones. Somebody who commits in long focused stretches
+on one repository at a time is that case, and should get the code rather than a
+note saying it was once tried.
+
+It is unfinished, and that is now a stated property rather than a gap: it reads
+the reflog and never the objects behind it, so a commit older than the reflog
+at first import, or made in a clone spoor never read, is invisible. Closing
+that means reading packfiles, and the measurement did not justify the work.
+
+### A confirmed day and a source that backfills years
+
+This is the first source that lands events under days somebody has already gone
+through by hand, and it lands years of them in one run. The rule from Stage 4
+stands unchanged: the events land, the snapshot is read rather than recomputed,
+and nothing about the filed answer moves. `--reconfirm` keeps every assignment
+and every pause answer already given — those live in tables confirming does not
+touch — which is what makes "take the day again" a cheap offer rather than
+"do the day again".
+
+What did change is the note. It used to join the disturbed days with commas,
+which reads as a disaster at fourteen; now the count comes first, the list is
+capped, and the sentence says plainly that every snapshot still reads as it was
+filed.
+
+## Next: the plugin contract
+
+Sources move out from behind the compiler: a date range in, JSON events out, so
+that a source nobody else needs can live outside this repository.
+
+The git source is the first one that already fits that shape exactly —
+`Collect(repos, from, to) ([]event.Event, Report)`, with the writing done
+outside it. The other three do not, and the reasons are the contract's real
+work: the two incremental sources carry bookkeeping that has to live beside the
+database, and the calendar needs to say more than "here are the events",
+because replacing a window safely needs "and I understood all of it". A
+contract that only carries events is enough for an appending source and not
+enough for a restating one.
+
+Two things from Stage 4 still want a week of use before anything is built on
 them: whether the queue really shrinks as rules accumulate, and what the pauses
 turn out to be. The second decides whether the screen that asks about them
 stays.

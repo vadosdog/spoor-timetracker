@@ -27,6 +27,7 @@ import (
 	"github.com/vadosdog/spoor-timetracker/internal/source/browser"
 	"github.com/vadosdog/spoor-timetracker/internal/source/calendar"
 	"github.com/vadosdog/spoor-timetracker/internal/source/claudecode"
+	"github.com/vadosdog/spoor-timetracker/internal/source/git"
 	"github.com/vadosdog/spoor-timetracker/internal/store"
 )
 
@@ -47,7 +48,8 @@ Usage:
   spoor add-calendar <id>   store a calendar's private URL, safely
 
 Sources: claude-code (session logs), browser (Chrome history; Firefox
-untested — see README), calendar (an iCalendar feed; off by default).
+untested — see README), calendar (an iCalendar feed; off by default),
+git (the reflog of the repositories listed in the config).
 
 Run "spoor <command> -h" for the flags of a command.
 
@@ -113,6 +115,8 @@ func runIngest(args []string, stdout io.Writer) error {
 	noClaude := fs.Bool("no-claude-code", false, "skip the Claude Code source")
 	noBrowser := fs.Bool("no-browser", false, "skip the browser source")
 	noCalendar := fs.Bool("no-calendar", false, "skip the calendar source, whatever the config says — this is what guarantees no network")
+	noGit := fs.Bool("no-git", false, "skip the git source")
+	gitBack := fs.Duration("git-back", defaultGitBack, "how far back to read the reflog of each configured repository")
 	var history repeatedPath
 	fs.Var(&history, "browser-history", "read this browser history database instead of the ones found automatically; repeatable")
 	back := fs.Duration("calendar-back", defaultCalendarBack, "how far back to expand calendar events")
@@ -123,6 +127,9 @@ func runIngest(args []string, stdout io.Writer) error {
 	}
 	if *back < 0 || *forward < 0 {
 		return errors.New("--calendar-back and --calendar-forward are lengths of time; neither can be negative")
+	}
+	if *gitBack < 0 {
+		return errors.New("--git-back is a length of time; it cannot be negative")
 	}
 
 	cfg, err := loadConfig(*cfgPath)
@@ -151,15 +158,30 @@ func runIngest(args []string, stdout io.Writer) error {
 		}
 		warnings = append(warnings, rep...)
 	}
-	// A broken calendar section must not throw away what the other sources
-	// already imported, and must not be reported as a successful run either.
-	// So the failure is held: everything else finishes, the totals print, the
-	// message prints, and the exit code still says something went wrong.
-	var deferred error
+	// A broken section of the config must not throw away what the other
+	// sources already imported, and must not be reported as a successful run
+	// either. So the failure is held: everything else finishes, the totals
+	// print, the message prints, and the exit code still says something went
+	// wrong.
+	//
+	// Both sections that can be broken this way are configured rather than
+	// discovered, and both refuse as a whole rather than per entry — a
+	// repeated id silently drops somebody's meetings or somebody's repository
+	// on the unique index, which looks exactly like a calendar with nothing in
+	// it. Held rather than fatal, because a typo in the git section is no
+	// reason for the calendar not to be read.
+	var deferred []error
+	if !*noGit {
+		rep, err := ingestGit(st, cfg, *gitBack, stdout, *quiet)
+		if err != nil {
+			deferred = append(deferred, err)
+		}
+		warnings = append(warnings, rep...)
+	}
 	if !*noCalendar {
 		rep, err := ingestCalendar(st, cfg, *back, *forward, stdout, *quiet)
 		if err != nil {
-			deferred = err
+			deferred = append(deferred, err)
 		}
 		warnings = append(warnings, rep...)
 	}
@@ -183,16 +205,15 @@ func runIngest(args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(disturbed) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s now holds different events from when it was confirmed; the snapshot "+
-				"still reads as it did, and `spoor confirm --day=%s --reconfirm` "+
-				"is how to take the day again",
-			strings.Join(disturbed, ", "), disturbed[0]))
+		warnings = append(warnings, disturbedNote(disturbed))
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
-	return deferred
+	// Joined rather than "the first one": two broken sections are two things
+	// to fix, and a run that named one of them would send somebody back for a
+	// second round.
+	return errors.Join(deferred...)
 }
 
 func ingestClaudeCode(st *store.Store, root string, stdout io.Writer, quiet bool) ([]string, error) {
@@ -290,6 +311,106 @@ func ingestBrowser(st *store.Store, cfg config.Config, named []string, stdout io
 		}
 	}
 	return append(warnings, rep.Errors...), nil
+}
+
+// maxDisturbedNamed is how many confirmed days the note below names before it
+// starts counting instead.
+const maxDisturbedNamed = 5
+
+// disturbedNote says that confirmed days now hold different events than when
+// they were frozen.
+//
+// It used to join every day with commas, which was right while the only source
+// that could reach backwards was a calendar restating last week. The git source
+// broke that: a reflog goes back years, so switching it on lands events under
+// every confirmed day at once, and a comma-separated wall of dates reads as a
+// disaster rather than as a new source arriving. So the count comes first, the
+// dates are capped, and the sentence says plainly that nothing moved.
+//
+// Nothing about the snapshot changes, here or anywhere. A confirmed day is the
+// answer somebody filed and it stands until they say otherwise — which is what
+// `--reconfirm` is, and reconfirming keeps every assignment and every pause
+// answer already given, because those live in tables of their own that
+// confirming does not touch.
+func disturbedNote(days []string) string {
+	named := days
+	tail := ""
+	if len(named) > maxDisturbedNamed {
+		named, tail = named[:maxDisturbedNamed], fmt.Sprintf(" and %d more", len(days)-maxDisturbedNamed)
+	}
+	subject := fmt.Sprintf("%d confirmed days", len(days))
+	if len(days) == 1 {
+		subject = "1 confirmed day"
+	}
+	return fmt.Sprintf(
+		"%s now hold different events from when they were confirmed (%s%s). Every "+
+			"snapshot still reads exactly as it was filed and nothing was recomputed; "+
+			"`spoor report --day=%s --recompute` shows what the rules would say now, "+
+			"and `spoor confirm --day=%s --reconfirm` takes the day again, keeping the "+
+			"answers already given",
+		subject, strings.Join(named, ", "), tail, days[0], days[0])
+}
+
+// defaultGitBack is how much reflog one run reads.
+//
+// The same four hundred days the calendar expands over, and for the same
+// reason: a database built from scratch should cover a history worth
+// reporting on. Re-reading is free — the identity of an entry is its instant
+// and its resulting sha, so a second run over the same window inserts nothing
+// — and a reflog is a few hundred kilobytes at worst.
+//
+// It also decides what is lost for good. Git prunes entries older than ninety
+// days when it garbage-collects, so a window shorter than the gap between two
+// runs would leave a hole nothing can fill later.
+const defaultGitBack = 400 * 24 * time.Hour
+
+// ingestGit runs the source that reads git's own journal.
+//
+// There is no discovery here, deliberately: the repositories come from the
+// config and spoor never walks a disk looking for ".git". A home directory
+// holds other people's checkouts, vendored copies and tutorials, and putting
+// all of them on somebody's timeline would be the source inventing a working
+// life rather than reconstructing one.
+func ingestGit(st *store.Store, cfg config.Config, back time.Duration, stdout io.Writer, quiet bool) ([]string, error) {
+	if !git.Supported() {
+		return nil, nil
+	}
+	// A repeated or missing id is fatal to the section and to nothing else,
+	// exactly as it is for a calendar: it does not make a rule misfire, it
+	// makes a repository vanish while the run reports success.
+	fatal, warnings := cfg.Git.Validate()
+	msgs := problemStrings(warnings)
+	if len(fatal) > 0 {
+		return msgs, fmt.Errorf("git: %s — no repository was read", fatal[0])
+	}
+
+	var repos []git.Repo
+	for _, r := range cfg.Git.Repos {
+		repo, err := git.Expand(r.ID, r.Path, paths.ExpandHome)
+		if err != nil {
+			return msgs, fmt.Errorf("repository %q: %w", r.ID, err)
+		}
+		repos = append(repos, repo)
+	}
+	// A machine with no repository configured is the default, and the default
+	// says nothing.
+	if len(repos) == 0 {
+		return msgs, nil
+	}
+
+	now := time.Now()
+	rep, err := git.Ingest(st, repos, now.Add(-back), now)
+	if err != nil {
+		return msgs, err
+	}
+	if !quiet {
+		fmt.Fprintln(stdout, rep.Describe())
+		fmt.Fprintf(stdout, "  events: %d found, %d new, %d outside the window, "+
+			"%d already recorded under another ref\n",
+			rep.Events, rep.NewEvents, rep.OutOfRange, rep.Collapsed)
+	}
+	msgs = append(msgs, rep.Notes()...)
+	return append(msgs, rep.Errors...), nil
 }
 
 // How far either way calendar events are expanded, when no flag says
@@ -810,18 +931,18 @@ func runCount(args []string, stdout io.Writer) error {
 	dbPath := fs.String("db", "", "database file (default: XDG data dir)")
 	from := fs.String("from", "", "first local day, YYYY-MM-DD (default: 6 days before --to)")
 	to := fs.String("to", "", "last local day, inclusive, YYYY-MM-DD (default: today)")
-	source := fs.String("source", "", "restrict to one source: claude-code, browser or calendar")
+	source := fs.String("source", "", "restrict to one source: claude-code, browser, calendar or git")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// With three valid values, a silent "0 events" is a guess between "I have
+	// With four valid values, a silent "0 events" is a guess between "I have
 	// none of that" and "I typed it wrong".
 	switch *source {
-	case "", claudecode.SourceName, browser.SourceName, calendar.SourceName:
+	case "", claudecode.SourceName, browser.SourceName, calendar.SourceName, git.SourceName:
 	default:
-		return fmt.Errorf("--source: no such source %q; there are %s, %s and %s",
-			*source, claudecode.SourceName, browser.SourceName, calendar.SourceName)
+		return fmt.Errorf("--source: no such source %q; there are %s, %s, %s and %s",
+			*source, claudecode.SourceName, browser.SourceName, calendar.SourceName, git.SourceName)
 	}
 
 	last, err := parseDay(*to, time.Now())

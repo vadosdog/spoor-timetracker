@@ -29,6 +29,10 @@ type Event struct {
 	// span of the day; Claude Code's system/turn_duration describes a turn
 	// that already has events at both ends, so reading it as a span would
 	// count the same seconds twice. See ownSpan in the report package.
+	//
+	// The git source never sets it. A commit is a point and nothing in a
+	// repository says how long the work before it took; that source is here
+	// for names, not for hours.
 	DurationMS *int64
 	// Type and Subtype are the source's own classification, kept verbatim so
 	// the database stays readable and the raw shape stays recoverable.
@@ -42,13 +46,19 @@ type Event struct {
 
 	// Entrypoint names which instance of a source produced the trace: "cli"
 	// or "claude-desktop" for Claude Code, "chrome" or "firefox" for the
-	// browser, the calendar's own id for a meeting. It is the one field every
-	// source fills.
+	// browser, the calendar's own id for a meeting, the repository's own id
+	// for a reflog entry. It is the one field every source fills.
 	Entrypoint string
 
 	// Fields below are Claude Code shaped. The plugin contract that
 	// generalises per-source fields is a later stage; until then each source
 	// fills its own and leaves the rest empty.
+	//
+	// CWD and GitBranch are the exception: the git source fills both, with the
+	// repository's working tree and the branch an entry was recorded against.
+	// Sharing the columns is the point — a dictionary rule is written about a
+	// directory and not about which program noticed it, so a path rule that
+	// already covers a checkout covers that checkout's reflog for free.
 	SessionID     string
 	CWD           string
 	GitBranch     string
