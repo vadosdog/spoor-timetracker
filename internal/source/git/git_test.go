@@ -156,18 +156,108 @@ func TestTheMessageIsNeverStored(t *testing.T) {
 
 // TestTheQualifierSurvivesTheVerb keeps "commit (amend)" apart from "commit".
 func TestTheQualifierSurvivesTheVerb(t *testing.T) {
-	for _, c := range []struct{ msg, want string }{
-		{"commit: x", "commit"},
-		{"commit (amend): x", "commit (amend)"},
-		{"commit (initial): x", "commit (initial)"},
-		{"rebase (finish): returning to refs/heads/main", "rebase (finish)"},
-		{"merge some/branch: Merge made by the 'ort' strategy.", "merge"},
-		{"checkout: moving from a to b", "checkout"},
-		{"", ""},
+	for _, c := range []struct {
+		msg, want string
+		known     bool
+	}{
+		{"commit: x", "commit", true},
+		{"commit (amend): x", "commit (amend)", true},
+		{"commit (initial): x", "commit (initial)", true},
+		{"rebase (finish): returning to refs/heads/main", "rebase (finish)", true},
+		{"merge some/branch: Merge made by the 'ort' strategy.", "merge", true},
+		{"checkout: moving from a to b", "checkout", true},
+		// No message at all: `git update-ref` writes such a line. It is
+		// otherVerb rather than "" so that the column agrees with the note
+		// printed about it.
+		{"", otherVerb, false},
 	} {
-		if got := verbOf(c.msg); got != c.want {
+		got, known := verbOf(c.msg)
+		if got != c.want || known != c.known {
+			t.Errorf("verbOf(%q) = %q,%v, want %q,%v", c.msg, got, known, c.want, c.known)
+		}
+	}
+}
+
+// TestAnUnknownActionNeverReachesTheColumn is the boundary, not a nicety.
+//
+// A reflog message is not always written by git: `git update-ref -m`,
+// GIT_REFLOG_ACTION and a hook can each put arbitrary text there, and
+// `git stash` does it by itself. Taking the first word would put the first
+// word of something a person typed into a stored column, and a commit message
+// carries names and ticket numbers.
+func TestAnUnknownActionNeverReachesTheColumn(t *testing.T) {
+	// Nothing a person typed may come back, whether the action is recognised
+	// or not. Where the verb itself is unknown the answer is "other"; where
+	// only the qualifier is junk, the qualifier is dropped and the verb stays.
+	for _, c := range []struct {
+		msg, want string
+	}{
+		{"On main: ABC-123 rework the login screen", otherVerb},
+		{"WIP on main: 1a2b3c4 ABC-123 rework the login screen", otherVerb},
+		{"SECRET-TICKET: whatever follows", otherVerb},
+		{"Переписал выгрузку по клиенту: x", otherVerb},
+		{"\x1b]0;title\x07evil: x", otherVerb},
+		{"commit (SECRET): the qualifier is not a free field either", "commit"},
+		{"commit ABC-123: x", "commit"},
+	} {
+		got, _ := verbOf(c.msg)
+		if got != c.want {
 			t.Errorf("verbOf(%q) = %q, want %q", c.msg, got, c.want)
 		}
+		for _, leak := range []string{"ABC-123", "SECRET", "login", "выгрузку", "evil"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("verbOf(%q) = %q — %q reached the column", c.msg, got, leak)
+			}
+		}
+	}
+}
+
+// TestAnUnknownActionIsCounted — a thing silently dropped looks exactly like a
+// thing that works, so the run has to say how often it happened.
+func TestAnUnknownActionIsCounted(t *testing.T) {
+	root := repo(t, map[string][]string{
+		"refs/heads/main": {
+			line(shaA, shaB, at(10, 0), "commit: fine"),
+			line(shaB, shaC, at(10, 5), "On main: something somebody typed"),
+		},
+	})
+	_, rep := collect(t, root)
+	if rep.UnknownVerbs != 1 {
+		t.Errorf("want 1 unknown action, got %d", rep.UnknownVerbs)
+	}
+	var found bool
+	for _, n := range rep.Notes() {
+		if strings.Contains(n, "does not know") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the count never reached the notes: %q", rep.Notes())
+	}
+}
+
+// TestARepositoryWithNoReflogSaysSo — a bare clone keeps no reflog unless
+// core.logAllRefUpdates is set, and this path was written down by hand, so
+// "read it and found nothing" must not read as "read it".
+func TestARepositoryWithNoReflogSaysSo(t *testing.T) {
+	// A real repository directory with no logs/ under it — which is what a
+	// bare clone, and anything with core.logAllRefUpdates off, looks like.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, rep := collect(t, root)
+	if rep.Silent != 1 {
+		t.Errorf("want 1 silent repository, got %d", rep.Silent)
+	}
+	var found bool
+	for _, n := range rep.Notes() {
+		if strings.Contains(n, "keep no reflog") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the count never reached the notes: %q", rep.Notes())
 	}
 }
 
@@ -371,8 +461,22 @@ func TestCollectIsDeterministic(t *testing.T) {
 // TestSupportedOnEverySystemWeBuildFor. This source knows no paths of its own,
 // so there is nothing here that could be wrong elsewhere — but the declaration
 // has to exist, and it has to include the system the tests are running on.
-func TestSupportedOnEverySystemWeBuildFor(t *testing.T) {
+func TestSupportedEverywhereAndVerifiedOnlyWhereItHasBeenRun(t *testing.T) {
+	// Supported is true everywhere on purpose: this source has no path of its
+	// own, so refusing to run would mean silently not reading repositories
+	// somebody wrote down by hand.
 	if !Supported() {
 		t.Fatalf("the git source declares itself absent on %s, where it is being tested", runtime.GOOS)
+	}
+	// Verified is the declaration rule 7 asks for, and it is a real list: if
+	// this ever becomes "true everywhere" as well, the declaration has stopped
+	// saying anything.
+	if Verified() != verifiedOS[runtime.GOOS] {
+		t.Errorf("Verified() disagrees with the list on %s", runtime.GOOS)
+	}
+	for _, os := range []string{"plan9", "js", "aix"} {
+		if verifiedOS[os] {
+			t.Errorf("%s is claimed as verified; nobody has run it there", os)
+		}
 	}
 }

@@ -17,6 +17,17 @@ once, at the end of the day, and only where the rules fell short.
 A personal tool, published in the open. In that order: it works for its author
 first, other people like it second.
 
+## The project is parked
+
+Stage 5 was the last one, as of 2026-10-26. The tool does what its author
+needed and is no longer being developed: there is no plugin contract, no
+database export and nothing that drives spoor from an assistant, and none of
+the three is coming. `docs/status.md` ends with what that costs.
+
+Everything in this file still holds for anyone changing this code — the hard
+limits most of all. What no longer holds is "one stage at a time": there are no
+more stages, so a change here is a change on its own terms.
+
 ## Hard limits
 
 1. **Not one personal path, token or name in this repository.** Anything
@@ -98,18 +109,21 @@ internal/rules       the dictionary: which project an event is, and which
                      subject inside it. Compiled from the config, applied
                      when a report is built
 internal/report      blocks, attribution, the four numbers, both renderers
-internal/source/…    one package per source: claudecode, browser, calendar
+internal/source/…    one package per source: claudecode, browser, calendar,
+                     git
 internal/text        string repair: valid UTF-8, and nothing that would make a
                      value display as something it is not. One of it, shared by
                      every source that reads somebody else's bytes
 internal/paths       XDG locations
-docs/status.md       where the work stopped and what is next
+docs/status.md       where the work stopped, and why it stopped there
 ```
 
 ## How to work
 
-- **One stage at a time.** The roadmap is cut so that each stage leaves a
-  working tool. "While I am here I will also do the next one" destroys that.
+- **One change at a time.** The work was cut into stages so that each one
+  left a working tool; the stages are over, but the habit is what kept this
+  thing usable throughout, and "while I am here I will also do the next one"
+  is what destroys it.
 - **Crude rules first.** Look at where they lie on real data and fix what
   actually broke. Clever heuristics on day one are a listed risk.
 - **Derive from measurements, not from the concept.** The JSONL format was

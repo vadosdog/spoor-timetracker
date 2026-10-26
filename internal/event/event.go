@@ -50,9 +50,9 @@ type Event struct {
 	// for a reflog entry. It is the one field every source fills.
 	Entrypoint string
 
-	// Fields below are Claude Code shaped. The plugin contract that
-	// generalises per-source fields is a later stage; until then each source
-	// fills its own and leaves the rest empty.
+	// Fields below are Claude Code shaped. A plugin contract generalising
+	// per-source fields was planned and never built, so each source fills its
+	// own and leaves the rest empty.
 	//
 	// CWD and GitBranch are the exception: the git source fills both, with the
 	// repository's working tree and the branch an entry was recorded against.

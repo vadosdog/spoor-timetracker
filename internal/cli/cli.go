@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -372,9 +373,6 @@ const defaultGitBack = 400 * 24 * time.Hour
 // all of them on somebody's timeline would be the source inventing a working
 // life rather than reconstructing one.
 func ingestGit(st *store.Store, cfg config.Config, back time.Duration, stdout io.Writer, quiet bool) ([]string, error) {
-	if !git.Supported() {
-		return nil, nil
-	}
 	// A repeated or missing id is fatal to the section and to nothing else,
 	// exactly as it is for a calendar: it does not make a rule misfire, it
 	// makes a repository vanish while the run reports success.
@@ -396,6 +394,15 @@ func ingestGit(st *store.Store, cfg config.Config, back time.Duration, stdout io
 	// says nothing.
 	if len(repos) == 0 {
 		return msgs, nil
+	}
+	// The source reads ordinary files and has no path of its own, so it runs
+	// anywhere — but it has only been used on the three systems it names, and
+	// saying so beats both silence and refusing to read what somebody wrote
+	// down by hand.
+	if !git.Verified() {
+		msgs = append(msgs, fmt.Sprintf(
+			"git: this source has not been tried on %s; it reads the repositories "+
+				"you listed anyway, and anything odd is worth reporting", runtime.GOOS))
 	}
 
 	now := time.Now()

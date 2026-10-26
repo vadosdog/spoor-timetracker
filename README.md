@@ -11,10 +11,10 @@ and the reflog of the git repositories you list. With none of them there is
 nothing for it to read.
 
 Three of those four earn their place. The git one did not: it is unfinished,
-off unless you list repositories, and measured to add nothing on the data it
-was built against. It is kept because somebody else's habits may differ — see
-[The git source](#the-git-source), which says what it gave and what to check
-before switching it on.
+off unless you list repositories, and on the data it was built against it
+named nothing the other three had not named already. It is kept because
+somebody else's habits may differ — see [The git source](#the-git-source),
+which says what it gave and what to check before switching it on.
 
 The calendar is the one source that leaves your machine, and it is off until
 you turn it on. [Network](#network) says exactly what it does and what it
@@ -26,15 +26,18 @@ the desktop app's plain chat tab writes none of them and is invisible here.
 That is not a gap somebody forgot: a chat has no working directory, so there
 would be nothing to name the time after even if the time could be found.
 
-**This is a personal tool, published in the open. It works for its author.
-There are no guarantees, no support and no promises about the next version.**
+**This is a personal tool, published in the open. It works for its author, and
+development is parked** — see [Where this stopped](#where-this-stopped).
+**There is no next version, no support and no guarantees.** Issues will be
+read; fixes are not promised.
 
 ## Status
 
-Early. `spoor` imports those sources into SQLite and reports what a day or
-a week went on: projects, hours, and the evidence for each. Which project
-something belongs to is decided by a dictionary you write in the config file:
-directory paths, browser keys, git branches and page titles. Below a project
+Working, and no longer being worked on. `spoor` imports those sources into
+SQLite and reports what a day or a week went on: projects, hours, and the
+evidence for each. Which project something belongs to
+is decided by a dictionary you write in the config file: directory paths,
+browser keys, git branches and page titles. Below a project
 sits one more level, for the thing that spans weeks — an episode, a level, a
 feature, a ticket.
 
@@ -47,50 +50,37 @@ Everything it does is also a flag.
 known rough edges — read it before filing a bug, because the thing you found
 may be on it already.
 
-## Roadmap
+## Where this stopped
 
-The order things are meant to happen in, without dates. This is an intention,
-not a commitment: the tool is written in the evenings, and the order changes
-when the data says something unexpected. It already has once — browser history
-was meant to come late, and the measurements moved it up to second, which is
-where it now is.
+**Development is parked.** What is described below works and is in use; nothing
+further is planned, and there is no next version. Issues will be read. Fixes
+are not promised, and neither is a reply by any particular day.
 
-**Next**
+That is a decision rather than drift. The tool answers the question it was
+built for — it reconstructs the day, a dictionary names most of it, meetings no
+longer show up as holes, and closing a day takes a handful of questions instead
+of a few hundred. What was left on the list added reach rather than function,
+and the author did not need the reach.
 
-- Sources as external plugins — a date range in, JSON events out — so a source
-  nobody else needs can live outside this repository. One built-in source, git,
-  already has exactly that shape internally; the other three do not, and the
-  reasons they do not are most of the work.
+Three things were on that list and will not arrive. They are worth knowing
+before you decide to depend on this:
 
-**Done since this list was written**
+- **The plugin contract was never settled.** The plan was a contract — a date range in,
+  JSON events out — so that a source nobody else needs could live outside this
+  repository. It was never fixed. A source you need therefore means a patch to
+  this repository, and the four built-in ones are the four there are.
+- **There is no export or backup of the database, and now there never will
+  be.** This matters more than it sounds like it does, and it has its own
+  warning
+  [before the install instructions](#the-database-is-the-only-copy).
+- **Nothing drives spoor from an assistant.** The idea was to close the day by
+  talking to whatever agent you already use, and to hand a day's log to a
+  web chat for the same thing. Neither was built. Every command is an ordinary
+  CLI with `--json` output, so the parts are there; the wrapper is not.
 
-- **git**, as a source — and this one is a qualified "done". It reads the
-  reflog of the repositories you list, it is off until you list some, and on
-  the two weeks it was measured against it changed nothing: the time no rule
-  could name was the same before and after. It is unfinished (the reflog only,
-  never the objects behind it) and kept anyway, because the habits it would
-  suit are not this author's. [The git source](#the-git-source) has the
-  numbers.
-- **Confirming a day.** `spoor confirm` — the terminal interface, the answers
-  written back as rules, and the frozen snapshot a report reads instead of
-  recomputing. `spoor export` writes a confirmed day out as markdown.
-- **The calendar**, as a source. It reads a private iCalendar feed, or a
-  downloaded `.ics`, and turns meetings into intervals of the day. The network
-  call is explicit and off by default: see [Network](#network).
-
-**Later**
-
-- Optional human-readable descriptions of a block. Off by default, local model
-  first, and the tool keeps working with the network mode never enabled.
-- Exporting and re-importing the **database**, plus a complaint when no import
-  has run for a while. (`spoor export` above writes a day out for a person to
-  read; this is the other kind.)
-  Until that exists the caveat under [Uninstall](#uninstall) stands.
-
-Not planned: a Jira or Confluence integration. Both are used through the
-browser, which this already reads, and an API would buy exact edit times and
-issue statuses that the report does not need. That changes only if worklogs
-ever need writing *back*, which is a different thing entirely.
+Not planned, and this one was never on the list: a Jira or Confluence
+integration. Both are used through the browser, which this already reads, and
+an API would buy exact edit times and issue statuses the report does not need.
 
 ## What it never does
 
@@ -105,9 +95,10 @@ ever need writing *back*, which is a different thing entirely.
   on its own sessions and lines, a meeting's title and how long it ran, and
   the address fields described in the next point. The text of your
   conversations, of tool results and of attachments is never stored, and
-  neither is a commit message — a boundary of the project, not a setting. Step 6 below prints every column of every table there is, most of
-  them with the comment saying what they hold, so you can check that instead of
-  trusting this paragraph.
+  neither is a commit message — a boundary of the project, not a setting.
+  Step 6 below prints every column of every table there is, most of them with
+  the comment saying what they hold, so you can check that instead of trusting
+  this paragraph.
 - **No URLs.** From your browsing history `spoor` keeps the host, the port,
   the *first* path segment, the page title and the time. Never the query
   string, never the fragment, never a second path segment — that is where
@@ -119,10 +110,12 @@ ever need writing *back*, which is a different thing entirely.
   [Ignoring domains](#ignoring-domains).
 - **Read-only where your other programs are concerned.** `spoor` never writes
   to or deletes anything under `~/.claude/`, and it never opens a browser's
-  history *as a database*: it reads the file through once, byte for byte,
-  into a private copy, works on the copy and deletes it. No lock is taken and
-  nothing is written back, whether or not the browser is running. Step 8
-  below is how you check that.
+  history *as a database*: it reads the file through once, byte for byte, into
+  a private copy, works on the copy and deletes it. No lock is taken and
+  nothing is written back, whether or not the browser is running. Step 8 below
+  is how you check the browser half of that. A repository you list is opened
+  for reading only as well — the `.git` pointer, then files under
+  `.git/logs/` — but there is no step here that demonstrates it to you.
 - **No cgo.** SQLite is `modernc.org/sqlite`, so one static binary
   cross-compiles anywhere.
 
@@ -264,113 +257,6 @@ signal to look for.
 Repeating meetings are expanded into the individual occurrences, so a weekly
 sync is fifty-two entries in a year rather than one.
 
-## The git source
-
-**This one is unfinished, and deliberately so. It is off unless you list
-repositories, and it did not prove its worth on the data it was built
-against** — read [what it measurably does](#what-it-measurably-does-and-does-not)
-at the end of this section before you list any.
-
-It reads `.git/logs/**` — the reflog, git's own journal of what moved and when
-— for the repositories you list in the config, and nothing else. No `git`
-binary is run and no repository objects are parsed, so this needs nothing
-installed and reaches no network. That is also where it stops: a commit older
-than the reflog at the time of the first import, or made in a clone spoor never
-read, is invisible to it, and reaching those would mean parsing packfiles —
-work the measurement below did not justify.
-
-It is here rather than deleted for two reasons. It is the one source already
-shaped the way external plugins will be — a date range in, events out — so it
-is the natural thing to rewrite against that contract when it exists. And it
-did nothing for *this* author's data, which is not the same as doing nothing
-for anybody: somebody who commits in long focused stretches on one repository
-at a time is the case it would suit, and that person should have the code
-rather than a note saying it was once tried. If you are that person, the
-numbers at the end of this section are what to check your own data against.
-
-```yaml
-git:
-  repos:
-    - id: widgets
-      path: ~/src/widgets
-    - id: spoor
-      path: ~/src/spoor
-```
-
-There is no discovery, deliberately. A home directory holds other people's
-checkouts, vendored copies and things cloned once to look at, and walking it
-for `.git` would put all of them on your timeline. `spoor ingest --no-git`
-turns the source off whatever the config says.
-
-The `id` names the repository and becomes part of the identity of every entry
-read from it, so two repositories must not share one — spoor refuses the
-section rather than letting the second one's entries vanish as duplicates. A
-path that is not a repository is a typo, and typos here are expensive: it is
-reported on a `warning:` line rather than passed over in silence.
-
-**What it stores**, per entry: the instant, the repository's directory, the
-branch the entry was recorded against, the verb (`commit`, `commit (amend)`,
-`checkout`, `rebase (finish)`, `pull`, …) and the two short shas the ref moved
-between, as `<old>..<new>` so you can paste it back into `git log`.
-
-**What it does not store is the message.** Everything after the first `": "` in
-a reflog line is free text somebody typed — a commit message, which is content
-this project does not keep, and in `clone: from https://user:token@host/x` a
-credential. The verb is read and the rest is never looked at.
-
-**No entry ever carries a duration.** A commit is a point in time: nothing in a
-repository says how long the work before it took, so this source is not allowed
-to put hours on a day. What it is for is names — the directory and the branch
-are two things the dictionary already knows how to read, so a `paths:` rule you
-have already written for a checkout covers that checkout's reflog with no
-second line.
-
-Re-reading is free. An entry's identity is its repository, its instant and its
-resulting sha, so a second run over the same reflog inserts nothing, and a
-`HEAD@{0}` that becomes `HEAD@{1}` the moment you commit does not change
-anything. That also means an imported entry outlives what it came from: git
-prunes its own log after ninety days, a rebase makes a commit unreachable, a
-deleted branch takes its whole log with it, and the row stays through all
-three.
-
-Each run re-reads the last four hundred days of every reflog; `--git-back`
-changes that. Wider than the ninety days above on purpose: what is not imported
-before git prunes it is gone, so the window is the one thing here worth being
-generous with.
-
-### What it measurably does, and does not
-
-Nothing to the hours, which is by design. Nothing to the share of time no rule
-could name either, which was the hope and did not happen: over the fourteen
-days it was measured against, that was **2.68 hours before git and 2.68 hours
-after**. Every stretch with no name was browsing, and not one commit fell
-inside one.
-
-Two numbers from the same window say why, and they are the ones to weigh before
-turning this on:
-
-- **Two thirds of what it produces lands where the answer is already
-  contested.** Of the 27 blocks of work holding a git event, 17 already carried
-  more than one project, and 140 of the 215 events were in those 17. A commit
-  cannot settle which project a stretch was when several are in it already —
-  and working on several things in one sitting is the normal case, not the
-  exception.
-- **The one thing a commit could honestly mark — "this is what the quiet
-  stretch before it was" — happened twice in fourteen days**, and both times
-  the block before it already had the same name. No new information either
-  time.
-
-Where it does change the answer is on days whose other traces have expired: a
-reflog goes back years, a browser history keeps ninety days and Claude Code
-erases its logs after thirty, so on an old day it can be the only thing left
-that names anything. That is worth having once, when a database is first filled
-in backwards, and it is not a reason to run the source every day. It also puts
-repositories you have not written a rule for into `spoor report --unmatched`,
-like any other directory.
-
-So: leave `git:` out of the config unless one of those two things is what you
-want. Nothing else in the tool changes either way.
-
 ## Requirements
 
 - **Go 1.25 or newer**, to build. Nothing is needed at runtime: the binary is
@@ -400,9 +286,31 @@ darwin/arm64 and windows/amd64, but a build that succeeds is not a claim that
 anything works there: macOS and Windows have never been run, including where
 the browser source looks for profiles on them.
 
+## The database is the only copy
+
+Read this before you install, not after you have six months in it.
+
+Claude Code deletes its own session logs after 30 days and Chrome keeps 90 days
+of history. Everything `spoor` imported from further back than that exists
+nowhere else on your machine: the sources it came from have erased it. That is
+the whole point of the design — the database accumulates rather than being
+rebuilt on demand — and it is also the risk.
+
+**There is no export and no backup command, and there will not be one.** It was
+on the list and the list ended; see [Where this stopped](#where-this-stopped).
+`spoor export` writes one confirmed day out as markdown for a person to read,
+which is a different thing and not a backup.
+
+So: if the history matters to you, `~/.local/share/spoor/spoor.db` belongs in
+whatever backup you already run. If it does not matter, nothing here needs
+doing — a deleted database is rebuilt by the next `spoor ingest` from whatever
+the sources still hold, which is the last 30 and 90 days and no further back.
+
 ## Install
 
-There are no releases yet; build it yourself.
+There are no releases, and there will not be any: building it yourself is the
+only way to get it, and that needs Go (see [Requirements](#requirements)
+above).
 
 ```
 git clone https://github.com/vadosdog/spoor-timetracker
@@ -447,9 +355,12 @@ spoor version
 `spoor <command> -h` prints the flags of that command.
 
 **`ingest`** imports what is new and leaves the rest alone: importing the same
-data twice changes nothing. Run it regularly — the two local sources erase
-themselves, and only what has been imported survives that. See
-[Uninstall](#uninstall) for how long each one keeps. A calendar feed does not erase
+data twice changes nothing. Run it regularly — session logs and browsing
+history erase themselves, and only what has been imported survives that:
+Claude Code keeps 30 days by default, Chrome 90. A reflog expires too — git's
+defaults are 90 days for reachable entries and 30 for unreachable ones — but
+only when `git gc` actually runs, which is why real reflogs often reach back
+years; see [The git source](#the-git-source). A calendar feed does not erase
 itself and does not only grow: it restates. So the calendar is the one source
 that replaces what it said last time rather than adding to it, and a meeting
 that was moved, renamed or cancelled is corrected on the next run. `ingest`
@@ -902,6 +813,7 @@ Everything follows the XDG base directory spec:
 | Claude Code logs, never written to | `~/.claude/projects/` | `--claude-dir`, or `CLAUDE_CONFIG_DIR` (read as `$CLAUDE_CONFIG_DIR/projects`) |
 | Chrome profiles, copied not opened | `~/.config/google-chrome/*/History` | `--browser-history` |
 | Firefox profiles, copied not opened | `~/.mozilla/firefox/*/places.sqlite` | `--browser-history` |
+| Reflogs, never written to; only repositories you list | `<repo>/.git/logs/**` | `git.repos` in the config; `--no-git` |
 
 Flatpak installations of either browser are searched for as well, and Snap
 for Firefox. Nothing else is searched for — not Snap Chrome, not Chromium,
@@ -977,19 +889,11 @@ calendar:
       # goes stale silently — it is only as fresh as your last download.
       file: ~/Downloads/team.ics
 
-git:
-  # Leave this section out unless you have read The git source above: it is
-  # off without it, and on the data it was built against it added nothing.
-  # The repositories whose reflog is read. There is no discovery: a home
-  # directory holds other people's checkouts as well as yours, and only you
-  # know which is which.
-  repos:
-      # The id is part of the identity of every entry read from here, so no
-      # two repositories may share one.
-    - id: widgets
-      path: ~/src/widgets
-    - id: spoor
-      path: ~/src/spoor
+# There is no `git:` section here on purpose. The source is off without one,
+# and on the data it was built against it named nothing the other three had
+# not named already. This example is meant to be copied, so read the section
+# called "The git source" below — the settings and the numbers are there —
+# before you add it.
 
 report:
   # Pauses shorter than this are the same block of work.
@@ -1143,7 +1047,7 @@ to be named by the block around it or not at all.
 says nothing, which is not the same as personal — on the data this was
 measured against, personal projects carried more than twice the hours of work
 ones, so a tool that assumed either way would be wrong about most of the day.
-It appears as `work` in `--json` and is not otherwise summed anywhere yet.
+It appears as `work` in `--json` and is not summed anywhere else.
 
 **`never`** lists traces that must not name a project — browser keys under
 `keys`, directories under `paths`:
@@ -1395,6 +1299,195 @@ A misspelled key anywhere in this file is an error rather than a setting that
 silently does nothing — for the reason given above, and because a threshold
 that quietly stayed at its default would be just as invisible.
 
+## The git source
+
+**This one is off unless you list repositories, and on the data it was built
+against it did not earn its place.** It is unfinished too, and that is
+written down rather than overlooked: it reads the reflog and never the objects
+behind it, so a
+commit older than the reflog at the time of the first import, or made in a
+clone spoor never read, is invisible. Reaching those would mean parsing
+packfiles, and the measurement at the end of this section did not justify the
+work.
+
+It is kept rather than deleted because it did nothing for *this* author's data,
+which is not the same as doing nothing for anybody. Somebody who commits in
+long focused stretches, one repository at a time, is the case it would suit,
+and that person is better served by the code than by a note saying it was once
+tried. [What it measured](#what-it-measured) is what to check your own data
+against.
+
+It reads `.git/logs/**` — the reflog, git's own journal of what moved and when
+— for the repositories you list, and nothing else. No `git` binary is run and
+no repository objects are parsed, so this needs nothing installed and reaches
+no network.
+
+```yaml
+git:
+  repos:
+    - id: widgets
+      path: ~/src/widgets
+    - id: spoor
+      path: ~/src/spoor
+```
+
+There is no discovery, deliberately. A home directory holds other people's
+checkouts, vendored copies and things cloned once to look at, and walking it
+for `.git` would put all of them on your timeline. `spoor ingest --no-git`
+turns the source off whatever the config says.
+
+The `id` names the repository and becomes part of the identity of every entry
+read from it, so two repositories must not share one — spoor refuses the
+section rather than letting the second one's entries vanish as duplicates. Two
+entries pointing at the *same* path get a `warning:` instead: that doubles
+rather than losing them, since the id is part of the identity, and it is easy
+to do
+by accident when a line is added for a worktree. A path that is not a
+repository is a typo, and typos here are expensive, so it is reported on a
+`warning:` line rather than passed over in silence.
+
+A checkout, a bare repository, a worktree and a submodule are all read. For a
+linked worktree, though, only `logs/HEAD` lives in its own git directory — the
+branch logs stay with the main checkout — so its entries are recorded against
+the branch name `HEAD`, which no dictionary rule can usefully match. And a
+repository that keeps no reflog at all yields nothing: git does not write one
+in a bare clone unless `core.logAllRefUpdates` is set, and the setting can be
+turned off anywhere. That case is counted and named in a note, because you
+wrote the path down by hand and "read it, found nothing" must not read as
+"read it".
+
+### What a git entry stores
+
+Per entry: the instant, the repository's directory and the `id` you gave it,
+the branch the entry was recorded against, the project guessed from the
+directory's last element — exactly as the Claude Code source guesses it, so
+your `paths:` and `never:` rules apply unchanged — the verb, and the two short
+shas the ref moved between as `<old>..<new>`. That range pastes back into
+`git log` except where one side is the all-zero sha, which is what git writes
+when a ref is created.
+
+The verb is `commit`, `commit (amend)`, `checkout`, `merge`, `pull`, `rebase
+(finish)`, `reset`, `branch`, `clone` and the rest of git's own vocabulary,
+taken from a fixed list. An action not on that list is stored as `other` and
+counted in a note. That is a deliberate allow-list, not tidiness: a reflog
+message is not always written by git — `git update-ref -m`, `GIT_REFLOG_ACTION`
+and a hook can each put arbitrary text there, and `git stash` already writes
+`On <branch>: <your message>` — so taking "the first word" would put the first
+word of something you typed into a stored column.
+
+**What it does not store is the message.** Everything after the first `": "` in
+a reflog line is free text somebody typed: a commit message, which is content
+this project does not keep, and in `clone: from https://user:token@host/x` a
+credential. The verb is read off the front and the rest is never looked at.
+
+**No entry carries a duration**, because a commit is a point in time and
+nothing in a repository says how long the work before it took. That is not the
+same as adding no hours: a block of work is made of events no further apart
+than `cluster_gap`, so a reflog entry can extend a block or open one. Measured,
+that came to 0.04 h over fourteen days — small, and not zero.
+
+Note also where that time lands. Attention is a prompt you typed or a page your
+browser recorded; a git entry is neither, so it counts as
+[background](#what-the-numbers-mean) — the report will say the agent worked while
+you did not, about a commit you made yourself. What the source is actually for
+is **names**: a block holding no prompt falls back to the nearest event that
+carries a project, and a reflog entry carries one.
+
+### What ingest prints
+
+Three repositories configured, one of them a typo and one keeping no reflog:
+
+```
+git: 3 repositories (2 read), 2 reflogs, 3 entries
+  events: 2 found, 2 new, 0 outside the window, 1 already recorded under another ref
+database: 2 events total
+warning: git: 1 entr(ies) had an action this parser does not know; they are recorded as "other"
+warning: git: 1 configured repositor(ies) keep no reflog, so nothing was read from them — a bare clone does not keep one unless core.logAllRefUpdates is set
+warning: repository "typo": ~/src/nowhere: not a git repository — no .git here
+```
+
+`read` is lower than `repositories` when a path was a typo or unreadable, and
+the `warning:` line names which. `entries` counts every non-empty line found
+under `logs/`, before any of them is parsed — so a file that is not a reflog at
+all still adds to it, and the `warning:` line about skipped lines is how you
+tell. `found` is lower than `entries` for two reasons: lines that did not parse
+are dropped, and one commit is written both to `HEAD` and to its branch, which
+collapses into one event — that second reason is what `already recorded under
+another ref` counts. `outside the window` is everything older than
+`--git-back`, which on a first run is most of the history.
+
+The `warning:` lines are the things a run refused or had to guess at, and there
+is one for each: lines under `logs/` that were not reflog lines, reflogs longer
+than the 8 MiB read limit (only the most recent part of those is read), actions
+that were not recognised, and repositories that keep no reflog. A limit that is
+reached always says so, because a source that quietly drops most of what it
+reads looks exactly like one that works.
+
+The 200 000-entry limit says so too, on a line of its own, and it is worth
+knowing what it keeps: the files are walked in sorted order, so `logs/HEAD`
+survives and the branch logs are the ones dropped — which is backwards for a
+source whose whole value is branch names. Nobody has reached it on real data;
+it is written down here rather than fixed.
+
+Re-reading is free. An entry's identity is its repository, its instant and its
+resulting sha, so a second run over the same reflog inserts nothing, and a
+`HEAD@{0}` that becomes `HEAD@{1}` the moment you commit changes nothing. That
+also means an imported entry outlives what it came from: a rebase makes a
+commit unreachable, a deleted branch takes its whole log with it, git prunes
+its own log eventually, and the row stays through all three.
+
+Each run re-reads the last four hundred days of every reflog; `--git-back`
+changes that. That is wider than git's own expiry on purpose. The defaults are
+ninety days for reachable entries and thirty for unreachable ones, but expiry
+only happens when `git gc` runs, so in practice a reflog often reaches back
+years and the four hundred days are not wasted. What is not imported before git
+does prune it is gone for good, which makes this window the one thing here
+worth being generous with.
+
+### What it measured
+
+The question was narrow: how much of the active time no rule could name does a
+branch and a directory name? Over the same fourteen days as every stage since
+the browser, with git off and then on: **2.68 hours before, 2.68 hours after.
+Nothing.** Every unnamed stretch was browsing, and not one commit fell inside
+one.
+
+Two numbers from that window say why, and they are the ones to weigh before
+turning this on:
+
+- **65% of what it produces lands where the answer is already contested.** Of
+  the 27 blocks of work holding a git event, 17 already carried more than one
+  project, and 140 of the 215 events were in those 17. A commit cannot settle
+  which project a stretch was when several are in it already — and working on
+  several things in one sitting is the normal case, not the exception.
+- **The one thing a commit could honestly mark — "this is what the quiet
+  stretch before it was" — happened twice in fourteen days**, and both times
+  the block before it already had the same name. No new information either
+  time.
+
+Over a longer window the result is not neutral but mildly negative. Across 41
+days, on days that still have browsing or session logs, switching git on moved
+unnamed time **up** by 1.6 h, while moving time that rests on the weakest rule
+in the program — a block named from a single neighbour — **down** by 3.4 h.
+Naming more events gives a block's neighbours more to disagree about, and a
+block whose neighbours disagree stays unnamed on purpose, so better evidence
+can make the remaining ambiguity more visible rather than smaller. Whether that
+trade is worth it depends on which of the two numbers you care about; for this
+author it was not.
+
+Where it does change the answer is on days whose other traces have expired. A
+browser history keeps ninety days and Claude Code erases its logs after thirty,
+while a reflog usually survives much longer than its nominal expiry, so on an
+old day it can be the only thing left that names anything — and 78% of what it names there arrives on that same
+weakest rule. That is worth having once, when a database is first filled in
+backwards, and it is not a reason to run the source every day. It also puts
+repositories you have not written a rule for into `spoor report --unmatched`,
+like any other directory.
+
+So: leave `git:` out of the config unless filling in old days is what you want,
+or unless your committing habits are the focused kind described at the top.
+Nothing else in the tool changes either way.
+
 ## Check it works
 
 Do this once after installing; it takes a couple of minutes.
@@ -1439,13 +1532,15 @@ three lines, not five, and that is not a fault.
 spoor ingest
 ```
 
-Expect `(0 read, N unchanged)`, `0 new` — on the two local sources. A calendar
-is different and always will be: it is fetched and re-read every run, so it
-reports `(1 read)` every time and has no `unchanged` count at all. What to look
-for there is `0 new` and **no** `restated:` line; that line is printed only
-when something actually moved. Otherwise, expect `(0 read, N unchanged)`,
-`0 new`, the same total as before, and no
-measurable delay — on every source line you got in step 2. A non-zero `new`
+Expect `(0 read, N unchanged)`, `0 new` — on the session-log and browser
+lines. The other two sources do not take that shape and never will. A calendar
+is fetched and re-read every run, so it reports `(1 read)` every time and has
+no `unchanged` count at all; what to look for there is `0 new` and **no**
+`restated:` line, which is printed only when something actually moved. The git
+source re-reads every reflog every run as well, so its first line does not
+change between runs at all — there `0 new` on the `events:` line is the whole
+of the check. Otherwise, expect the same total as before and no measurable
+delay, on every source line you got in step 2. A non-zero `new`
 is not necessarily a bug: if you kept working — or kept browsing — between
 the two runs, there was something new to import. Run it a third time; that
 one must report zero.
@@ -1749,11 +1844,10 @@ of a browser history goes to a temporary directory and is deleted again. It
 installs no service, no timer and no shell hook, so removing it is removing
 files.
 
-**Before you do: the database is the only copy.** Claude Code deletes its own
-session logs after 30 days by default and Chrome keeps 90 days of history, so
-everything imported from further back than that exists nowhere else on the
-machine. There is no undo, and there is no way to export the database either — if the history
-matters to you, `spoor.db` belongs in whatever backup you already run.
+**Before you do: the database is the only copy**, there is no undo, and there
+is no way to export it — see
+[The database is the only copy](#the-database-is-the-only-copy) above for what
+that costs and what to do about it.
 
 ```
 rm -rf ~/.local/share/spoor    # the database and its -wal / -shm files
@@ -1775,8 +1869,9 @@ deleting the file here does not revoke it.
 
 To wipe the collected data but keep using the tool, delete only the database.
 The next `spoor ingest` rebuilds it from whatever the sources have not erased
-yet — 30 days of session logs, 90 days of Chrome history — and no further
-back.
+yet — 30 days of session logs, 90 days of Chrome history — and no further back,
+unless you have switched the git source on: a reflog goes back much further,
+and that is the one case where a rebuild reaches past those windows.
 
 ## License
 

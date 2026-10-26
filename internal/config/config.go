@@ -21,9 +21,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
+	"github.com/vadosdog/spoor-timetracker/internal/paths"
 	"gopkg.in/yaml.v3"
 )
 
@@ -67,6 +70,7 @@ type GitRepo struct {
 // the run reports success.
 func (g Git) Validate() (fatal []Problem, warnings []Problem) {
 	seen := map[string]int{}
+	seenPath := map[string]int{}
 	for i, r := range g.Repos {
 		where := fmt.Sprintf("repository #%d", i+1)
 		if r.ID != "" {
@@ -88,9 +92,46 @@ func (g Git) Validate() (fatal []Problem, warnings []Problem) {
 
 		if r.Path == "" {
 			fatal = append(fatal, Problem{where, "has no path; there is nothing to read"})
+			continue
+		}
+		// A repeated path is a warning rather than fatal, because unlike a
+		// repeated id it loses nothing: it doubles. Two ids over one working
+		// tree read the same reflog twice and the unique index does not catch
+		// it — the id is part of an entry's identity, so the rows differ.
+		// Easy to do by accident: a line added for a worktree, or a path
+		// renamed with the old entry left behind.
+		if first, ok := seenPath[cleanRepoPath(r.Path)]; ok {
+			warnings = append(warnings, Problem{where, fmt.Sprintf(
+				"has the same path as repository #%d; every entry there would be "+
+					"recorded twice, once under each id", first)})
+		} else {
+			seenPath[cleanRepoPath(r.Path)] = i + 1
 		}
 	}
 	return fatal, warnings
+}
+
+// cleanRepoPath is only for comparing two configured paths with each other.
+//
+// "~" is expanded and the result made absolute, because that is what the two
+// entries will mean by the time they are read — `~/src/x` and `/home/u/src/x`
+// in two entries are the doubling this warning exists to catch, and comparing
+// the spellings instead of the meanings would miss exactly that case. Neither
+// step touches the filesystem.
+//
+// Symlinks are not resolved, and that one does need the disk: a check that
+// went looking would be a different kind of thing, and the residue is two
+// entries reaching one tree by different routes, which nothing here catches.
+func cleanRepoPath(p string) string {
+	expanded, err := paths.ExpandHome(strings.TrimSpace(p))
+	if err != nil {
+		expanded = strings.TrimSpace(p)
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		abs = expanded
+	}
+	return strings.TrimRight(filepath.Clean(abs), "/")
 }
 
 // Calendar configures the one source that can reach the network.

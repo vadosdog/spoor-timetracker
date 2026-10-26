@@ -50,11 +50,17 @@ CREATE TABLE IF NOT EXISTS events (
     duration_ms    INTEGER,
 
     -- The source's own classification, kept verbatim.
-    -- For git, type is 'reflog' and subtype is the first word of the action —
-    -- 'commit', 'commit (amend)', 'checkout', 'rebase (finish)', 'pull'. The
-    -- first word and no more: everything after the first ': ' in a reflog
+    -- For git, type is 'reflog' and subtype is the action: 'commit',
+    -- 'commit (amend)', 'checkout', 'merge', 'pull', 'rebase (finish)',
+    -- 'reset', 'branch', 'clone' and the rest of git's own vocabulary, taken
+    -- from a fixed list. An action not on that list is stored as 'other'.
+    -- The action and no more: everything after the first ': ' in a reflog
     -- message is a commit message, which is content, and 'clone: from
-    -- https://user:token@host/x' puts a credential there too.
+    -- https://user:token@host/x' puts a credential there too. The list is an
+    -- allow-list on purpose -- the message is not always written by git
+    -- ('update-ref -m', GIT_REFLOG_ACTION, a hook, and 'git stash' writes
+    -- 'On <branch>: <message>'), so taking the first word would store the
+    -- first word of something a person typed.
     type           TEXT    NOT NULL,
     subtype        TEXT    NOT NULL DEFAULT '',
 

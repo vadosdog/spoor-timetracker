@@ -49,6 +49,17 @@ type Report struct {
 	Malformed  int
 	// Capped is reflog files so long that only their tail was read.
 	Capped int
+	// UnknownVerbs is entries whose action this parser does not recognise.
+	// They are kept, under the verb "other": a reflog message is not always
+	// written by git, and the action is the only part of it this source
+	// stores, so an unrecognised one is reported rather than guessed at.
+	UnknownVerbs int
+	// Silent is repositories that were found and read and held no reflog at
+	// all. A bare clone is the ordinary case — git does not keep a reflog
+	// there unless core.logAllRefUpdates is set — and so is any repository
+	// with that setting turned off. Counted because somebody wrote this path
+	// down by hand, and "read it, found nothing" must not look like "read it".
+	Silent int
 	Errors []string
 }
 
@@ -84,7 +95,17 @@ func Collect(repos []Repo, from, to time.Time) ([]event.Event, Report) {
 		}
 		rep.ReposRead++
 
-		for _, e := range readRepo(dir, &rep) {
+		logsBefore, errsBefore := rep.Logs, len(rep.Errors)
+		found := readRepo(dir, &rep)
+		// Silent is "there was no reflog here", not "nothing came back".
+		// A log that could not be read, or one whose lines were all
+		// malformed, already has its own line, and claiming
+		// core.logAllRefUpdates on top of it would send somebody looking in
+		// the wrong place.
+		if len(found) == 0 && rep.Logs == logsBefore && len(rep.Errors) == errsBefore {
+			rep.Silent++
+		}
+		for _, e := range found {
 			if e.At.Before(from) || !e.At.Before(to) {
 				rep.OutOfRange++
 				continue
@@ -201,6 +222,17 @@ func (r Report) Notes() []string {
 		out = append(out, fmt.Sprintf(
 			"git: %d reflog(s) were longer than the read limit, so only the most recent "+
 				"part of them was read", r.Capped))
+	}
+	if r.UnknownVerbs > 0 {
+		out = append(out, fmt.Sprintf(
+			"git: %d entr(ies) had an action this parser does not know; they are "+
+				`recorded as "other"`, r.UnknownVerbs))
+	}
+	if r.Silent > 0 {
+		out = append(out, fmt.Sprintf(
+			"git: %d configured repositor(ies) keep no reflog, so nothing was read from "+
+				"them — a bare clone does not keep one unless core.logAllRefUpdates is set",
+			r.Silent))
 	}
 	return out
 }

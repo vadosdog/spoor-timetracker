@@ -1572,7 +1572,7 @@ somebody answering questions, and that has not happened yet.
 - **The scope question has no default and cannot be skipped.** That is
   deliberate and it is also the slowest keystroke in the loop. If two minutes
   turns out to be tight, this is the first place somebody will want a
-  "remember my answer" switch — and it is the one place the roadmap says there
+  "remember my answer" switch — and it is the one place the plan said there
   must not be one.
 - **A database made by an intermediate build of this stage has the narrow key
   on `confirmed_one_off`** — `(day, from_ts)` rather than
@@ -1622,8 +1622,10 @@ written, which is the one thing this project does not do.
 
 ### What this source knows about its own format
 
-- **The reflog is the whole of it, and it is enough for commits.** Every commit
-  made on this machine is a line in `.git/logs/HEAD` and in its branch's log:
+- **The reflog is the whole of it, and it is enough for commits.** Almost every
+  commit made on this machine is a line in `.git/logs/HEAD` and in its branch's
+  log — almost, because git keeps no reflog where `core.logAllRefUpdates` is
+  off, which is the default in a bare repository:
   `commit:`, `commit (amend):`, `commit (initial):`. `git log` was rejected on
   purpose — it is a list of objects, not a journal of actions, so the author
   date of a commit somebody else pushed says when *they* worked, and a rebase
@@ -1634,8 +1636,13 @@ written, which is the one thing this project does not do.
   quietly match nothing.
 - **The message is never read past the verb.** Everything after the first
   `": "` is text somebody typed: a commit message, which is content, and in
-  `clone: from https://user:token@host/x` a credential. The verb is the first
-  word plus a parenthesised qualifier, and nothing else.
+  `clone: from https://user:token@host/x` a credential. The verb is taken from
+  a fixed list of the actions git writes, plus a qualifier from a second list;
+  anything else is stored as `other` and counted. An allow-list rather than
+  "the first word", because the message is not always git's: `update-ref -m`,
+  `GIT_REFLOG_ACTION` and a hook can each put arbitrary text there, and
+  `git stash` writes `On <branch>: <message>` by itself — so "the first word"
+  was the first word of a person's message.
 - **One action is written to several logs.** A commit lands in `logs/HEAD` and
   in `logs/refs/heads/<branch>` with the same second and the same resulting
   sha; a pull adds a third copy under `refs/remotes/`. They collapse to one
@@ -1683,9 +1690,24 @@ Where it does change the answer is on days whose other traces have expired — a
 reflog goes back years, a browser history keeps ninety days, Claude Code erases
 its logs after thirty — and there it is the only thing left that names
 anything. That is worth having once, when a database is filled in backwards,
-and 78% of it arrives on the weakest rule in the program. On days that still
-have browsing or session logs it trades unnamed time *up* by 1.6 h and
-one-neighbour time *down* by 3.4 h across 41 days.
+and 78% of what it names there arrives on the weakest rule in the program —
+the one that names a block from a single neighbour, with nothing on the other
+side to agree or disagree with it.
+
+A second measurement, over a wider window, says the result is not neutral but
+mildly negative. The fourteen days above are the window every stage since 1.5
+has used, and they cannot show this: it needs days on which git has something
+to say *and* the other sources do too. Over **41 days**, counting only days
+that still have browsing or session logs, switching the source on moved
+unnamed time **up** by 1.6 h while moving one-neighbour time **down** by 3.4 h.
+
+The two windows do not contradict each other, and the second does not cancel
+the first. Naming more events gives a block's neighbours more to disagree
+about, and a block whose neighbours disagree stays unnamed on purpose — the
+same effect Stage 3 measured when the dictionary raised the unnamed event count
+from 256 to 258. Better evidence made the remaining ambiguity more visible
+rather than smaller. Whether that is an improvement depends on which number is
+being optimised; for this author neither direction was worth the source.
 
 **The decision: the source stays, off unless repositories are listed, and it is
 not presented as something that works.** It did nothing for this author's data
@@ -1716,21 +1738,61 @@ which reads as a disaster at fourteen; now the count comes first, the list is
 capped, and the sentence says plainly that every snapshot still reads as it was
 filed.
 
-## Next: the plugin contract
+## Where this stopped, and why
 
-Sources move out from behind the compiler: a date range in, JSON events out, so
-that a source nobody else needs can live outside this repository.
+**Development is parked, as of 2026-10-26. Stage 5 is the last one.** This is a
+decision rather than a drift, and the reasoning is worth leaving behind for
+whoever reads this next — including the author in a year.
 
-The git source is the first one that already fits that shape exactly —
-`Collect(repos, from, to) ([]event.Event, Report)`, with the writing done
-outside it. The other three do not, and the reasons are the contract's real
-work: the two incremental sources carry bookkeeping that has to live beside the
-database, and the calendar needs to say more than "here are the events",
-because replacing a window safely needs "and I understood all of it". A
-contract that only carries events is enough for an appending source and not
-enough for a restating one.
+The tool answers the question it was built for. The day is reconstructed from
+traces nobody had to remember to leave; a dictionary names most of it; meetings
+stopped showing up as holes; closing a day takes a handful of questions instead
+of a few hundred. What remained on the list added reach rather than function,
+and the reach was not needed.
 
-Two things from Stage 4 still want a week of use before anything is built on
-them: whether the queue really shrinks as rules accumulate, and what the pauses
-turn out to be. The second decides whether the screen that asks about them
-stays.
+Three things were planned and will not arrive. Each has a cost, and the costs
+are the honest part of this note.
+
+**The plugin contract was never settled.** The plan was that sources move out
+from behind the compiler — a date range in, JSON events out — so that a source
+nobody else needs could live outside this repository. The git source is the one
+that already fits that shape exactly: `Collect(repos, from, to) ([]event.Event,
+Report)`, with the writing done outside it. The other three do not, and the
+reasons are what the contract's real work would have been: the two incremental
+sources carry bookkeeping that has to live beside the database, and the
+calendar needs to say more than "here are the events", because replacing a
+window safely needs "and I understood all of it". A contract that only carries
+events is enough for an appending source and not enough for a restating one.
+The cost: a source somebody else needs is a patch to this repository, and the
+four built-in ones are the four there are. The concept called this the
+project's survival question, and it is left unanswered.
+
+**The database still has no export and no backup.** It is the only copy of
+everything that has aged out of the sources — 30 days for session logs, 90 for
+Chrome history — and that is now permanent. README says so above the install
+instructions rather than under "Uninstall", which is the one change this made
+to the documentation.
+
+**Nothing drives spoor from an assistant.** Every command has a non-interactive
+form and `--json` output, so the parts are there; the wrapper that would let
+somebody close their day by talking to the agent they already use was never
+written.
+
+One consequence of the last change is worth knowing if you already have a
+database. The verb an entry is filed under used to be the first word of the
+reflog message; it is now taken from a fixed list, lower-cased, with anything
+unrecognised stored as `other`. Rows already in the database keep what they
+were given — `INSERT OR IGNORE` matches on the identity, and the verb is not
+part of it — so an old database can hold `Branch` beside `branch`, and, more
+to the point, the first words of reflog messages that were never git's own:
+`On`, `WIP`, and whatever a `git update-ref -m` or a hook wrote. That is the
+leak the allow-list closed, and closing it does not reach backwards. Deleting
+the database and importing again is the only way to clear those rows, at the
+cost of everything that has aged out of its source.
+
+Two questions from Stage 4 were waiting on a week of use and did not get an
+answer: whether the queue really shrinks as rules accumulate, and what the
+pauses turn out to be. The screen that asks about pauses stays, undecided.
+
+Everything before this section is the record of how the tool got here. The
+loose ends listed under each stage are still loose, and still accurate.

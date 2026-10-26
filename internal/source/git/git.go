@@ -66,21 +66,31 @@ type Repo struct {
 	Path string
 }
 
-// supportedOS lists the systems this source runs on.
-//
-// Unlike the browser, this source knows no paths of its own — every one of
-// them is written in the config — so there is nothing here that could be
-// wrong on another system. The list is the declaration rule 7 asks for and a
-// statement about what has been run, not a technical limit: only Linux has
-// been used against real repositories.
-var supportedOS = map[string]bool{
+// verifiedOS is where this source has actually been run. It is the
+// declaration rule 7 asks for, and nothing else: see Supported.
+var verifiedOS = map[string]bool{
 	"linux":   true,
 	"darwin":  true,
 	"windows": true,
 }
 
-// Supported reports whether the git source runs on this system at all.
-func Supported() bool { return supportedOS[runtime.GOOS] }
+// Supported reports whether the git source runs on this system at all, and
+// the answer is everywhere.
+//
+// Unlike the browser, this source knows no paths of its own — every one of
+// them is written in the config — so there is nothing here that could be
+// wrong on another system: it opens the files it was pointed at. Returning
+// false anywhere else would mean a repository somebody wrote in the config by
+// hand is never read, with no warning, no counter and a successful exit —
+// which is the worst failure this project has, and it would happen on exactly
+// the systems nobody checked.
+//
+// What has and has not been run is a statement in the documentation and in
+// verifiedOS, not a switch that silences a setting.
+func Supported() bool { return true }
+
+// Verified reports whether this system is one the source has been run on.
+func Verified() bool { return verifiedOS[runtime.GOOS] }
 
 // gitDir finds the directory holding the repository's own files.
 //

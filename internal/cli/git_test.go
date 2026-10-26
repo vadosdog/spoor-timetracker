@@ -88,18 +88,22 @@ func TestGitImportIsIdempotent(t *testing.T) {
 // makes a commit unreachable; the database is the only copy after that. Same
 // promise the Claude Code source makes about its 30-day files.
 func TestAnImportedEntryOutlivesItsReflog(t *testing.T) {
-	repo := fakeRepo(t,
-		reflogLine(sha1s, sha2s, 2*time.Hour, "commit: one"),
-		reflogLine(sha2s, sha1s, time.Hour, "commit: two"),
-	)
+	// Both lines are built once and the kept one is reused verbatim below.
+	// Calling reflogLine again would ask the clock a second time, and since
+	// the entry's identity is its instant, a run that straddles a second
+	// boundary would make the surviving line look like a different entry —
+	// the test would then fail for a reason that has nothing to do with
+	// pruning.
+	one := reflogLine(sha1s, sha2s, 2*time.Hour, "commit: one")
+	two := reflogLine(sha2s, sha1s, time.Hour, "commit: two")
+	repo := fakeRepo(t, one, two)
 	cfg := gitConfig(t, "fixture", repo)
 	db := filepath.Join(t.TempDir(), "spoor.db")
 	run(t, "ingest", "--db", db, "--config", cfg, "--no-claude-code", "--no-browser", "--no-calendar")
 
 	// The log is pruned back to its last entry, as `git gc` would leave it.
 	log := filepath.Join(repo, ".git", "logs", "refs", "heads", "main")
-	kept := reflogLine(sha2s, sha1s, time.Hour, "commit: two")
-	if err := os.WriteFile(log, []byte(kept+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(log, []byte(two+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
