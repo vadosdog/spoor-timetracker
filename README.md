@@ -46,9 +46,11 @@ not name, takes the answer as a line of the dictionary so the same question is
 not asked twice, and freezes the result so that day's numbers stop moving.
 Everything it does is also a flag.
 
-[docs/status.md](docs/status.md) says where the work stopped, and lists the
-known rough edges — read it before filing a bug, because the thing you found
-may be on it already.
+[docs/status.md](docs/status.md) is the development log, stage by stage, and
+it ends with why the work stopped. It is long and it is not a tidy list, but
+each stage closes with a "Loose ends" section naming what is known to be
+wrong — worth a search before filing a bug, because the thing you found may
+be written down there already.
 
 ## Where this stopped
 
@@ -65,10 +67,10 @@ and the author did not need the reach.
 Three things were on that list and will not arrive. They are worth knowing
 before you decide to depend on this:
 
-- **The plugin contract was never settled.** The plan was a contract — a date range in,
+- **A source you need means patching this repository**, and the four built-in
+  ones are the four there are. The plan had been a contract — a date range in,
   JSON events out — so that a source nobody else needs could live outside this
-  repository. It was never fixed. A source you need therefore means a patch to
-  this repository, and the four built-in ones are the four there are.
+  repository. It was never settled on, and it is not going to be.
 - **There is no export or backup of the database, and now there never will
   be.** This matters more than it sounds like it does, and it has its own
   warning
@@ -320,6 +322,13 @@ go build -o ~/.local/bin/spoor ./cmd/spoor
 
 `~/.local/bin` is just one option — anywhere on your `PATH` works. The rest of
 this file assumes `spoor` is runnable by name.
+
+**The build needs the network; the finished binary does not.** There is no
+`vendor/` directory here, so `go build` fetches five modules the first time —
+bubbletea and its terminal dependencies, and a YAML parser. Everything
+[Network](#network) promises is about running `spoor`, not about compiling it.
+On a machine with no outbound access, build elsewhere and copy the binary
+across: it is static and needs nothing at runtime.
 
 ## Commands
 
@@ -770,7 +779,7 @@ day cannot become a rule and has to say so with `--one-off`; those are counted,
 and the count is printed when the day is confirmed, because hand marking that
 nobody can see is hand marking nobody revisits.
 
-**`export`** writes a confirmed day out. One format today, `markdown`.
+**`export`** writes a confirmed day out. One format, `markdown`, and it will stay the only one.
 `--timeline` adds the schedule, and it is the stored partition rather than the
 report's: one row per stretch with one answer to every question, which on a
 working day is tens of rows where `report --timeline` prints a dozen.
@@ -1275,18 +1284,23 @@ from a project name, and the ignore list is the only control there is. Look
 for them before the first import:
 
 ```
-python3 -c "import sqlite3,os;d=sqlite3.connect(os.path.expanduser('~/.local/share/spoor/spoor.db'));[print(r[0],'|',r[1]) for r in d.execute(\"SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 20 ORDER BY host\")]"
+python3 -c "import sqlite3,os;d=sqlite3.connect(os.path.expanduser('~/.local/share/spoor/spoor.db'));[print(r[0],'|',r[1]) for r in d.execute(\"SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 10 ORDER BY host\")]"
 ```
 
 ```
 sqlite3 ~/.local/share/spoor/spoor.db \
-  "SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 20 ORDER BY host"
+  "SELECT DISTINCT host, path_head FROM events WHERE length(path_head) >= 10 ORDER BY host"
 ```
 
-Long is not the same as secret — an article slug is long and harmless — but
-everything that *is* a secret in that column will be in this list. A host that
-turns one up belongs on `ignore`, and the rows already imported have to be
-deleted by hand — the two `DELETE` snippets earlier in this section do that,
+Ten characters, not twenty, and the threshold is the weak part of this check:
+a Google Meet code is twelve characters and a `forms.gle` token is eighteen, so
+a higher bar would miss the very examples above. Ten brings in a lot of
+harmless slugs with them — long is not the same as secret, and an article slug
+is both long and dull — so this list is meant to be read, not trusted to be
+short. Nothing guarantees a secret is over ten characters either; the only
+thing this really does is put the column in front of you. A host that turns one
+up belongs on `ignore`, and the rows already imported have to be deleted by
+hand — the two `DELETE` snippets earlier in this section do that,
 with the host substituted.
 
 **`history`** adds history databases to the ones found automatically — for a
@@ -1520,7 +1534,21 @@ database: 22800 events total
 ```
 
 The numbers above are made up; yours will be your own. A month of session
-logs and 90 days of browsing take a second or two together. Other extra lines
+logs and 90 days of browsing take a second or two together.
+
+`session-state lines skipped` is the normal case, not a problem: a session log
+holds thousands of lines that record the state of a session rather than a
+moment in it — a remembered prompt, a title, a mode — and those are skipped on
+purpose. Expect the count to be a large fraction of `lines`.
+
+It is worth knowing the shape of the one failure this does not distinguish.
+A file under the session directory whose lines carry none of the fields this
+parser reads is counted in `lines`, counted again as skipped session state, and
+produces no events — and `ingest` exits 0 with no warning, because that is
+exactly what a directory full of genuine session state looks like. So `0 found`
+on a source you expected to have data means "nothing here was recognised",
+not "nothing happened", and the place to look is whether the files are the
+ones you think they are. Other extra lines
 appear only when a source dropped something — an unreadable line, or a meeting
 the calendar skipped — and **a source that found nothing
 to read is not mentioned at all** — with only one of those two installed you get
@@ -1697,7 +1725,10 @@ sqlite3 ~/.local/share/spoor/spoor.db \
 
 Every `raw_text` must be one of: empty, a model name, a comma-separated list
 of tool names, a model name and tool names separated by a space, `prompt`,
-`tool_result`, or the kind of an attachment.
+`tool_result`, or the kind of an attachment — and, if you switched the git
+source on, a pair of short shas written as `1a2b3c4d5e6f..7890abcdef12`. That
+last one looks alarming in a list sorted by length and is not a leak; see
+[The git source](#the-git-source).
 
 Length proves nothing on its own — MCP tool names look like
 `mcp__server__some_long_tool_name`, so a message that called three of them
@@ -1825,7 +1856,11 @@ both names is the fix, and the next step is how to find it.
 spoor report --unmatched
 ```
 
-Every directory in the first list is a project the tool is naming by
+The output has up to two lists: working directories first, then browser keys.
+Either is left out entirely when there is nothing in it, so a run that prints
+only one list is not a truncated answer.
+
+Every directory in the directories list is a project the tool is naming by
 guesswork. The one at the top costs the most time, so it is the line worth
 writing first — and once it is written, it leaves the list. A directory that
 turns out to mean nothing goes under `never: paths:` instead, which is just as

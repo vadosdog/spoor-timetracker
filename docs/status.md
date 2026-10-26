@@ -1790,9 +1790,21 @@ leak the allow-list closed, and closing it does not reach backwards. Deleting
 the database and importing again is the only way to clear those rows, at the
 cost of everything that has aged out of its source.
 
-Two questions from Stage 4 were waiting on a week of use and did not get an
-answer: whether the queue really shrinks as rules accumulate, and what the
-pauses turn out to be. The screen that asks about pauses stays, undecided.
+Two questions from Stage 4 were waiting on a week of use and never got an
+answer, and now never will: whether the queue really shrinks as rules
+accumulate, and what the pauses turn out to be. The screen that asks about
+pauses stays, on the grounds that nothing was learned against it.
+
+One report from the final read-through could not be reproduced and is written
+down rather than dropped. On a confirmed day whose data had since been changed
+by hand — a `never:` rule applied, a pause answered with
+`--window-project` — the table header read `traces 09:00 to 14:30` while the
+same report quoted a span of 6:07, which do not add up. Two attempts to
+reproduce it failed: on synthetic days the header and the span agree, and a
+confirmed day keeps both frozen when later events arrive, which is the
+documented behaviour. The ingredient not reproduced was a calendar meeting in
+the same day, which is the one thing that can push the last moment of a day
+past the last trace. If somebody meets this, that is where to look.
 
 Everything before this section is the record of how the tool got here. The
 loose ends listed under each stage are still loose, and still accurate.
